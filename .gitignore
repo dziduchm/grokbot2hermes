@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local credentials and state: never commit keys, receipts or logs
+.env
+receipts/
+run-*.json
+.g2h-*.tmp
+
+# OS noise
+.DS_Store
