@@ -1,0 +1,39 @@
+#!/bin/sh
+# grokbot-poll.sh.example: a minimal polling loop for the Grok Bot adapter.
+# Example fixture only; nothing installs or runs this automatically.
+#
+# Walks every receipt under $RECEIPTS and blocks until each run settles.
+# Human controls (exit 16) are surfaced and left for the operator; the loop
+# never answers an approval or a clarification by itself.
+#
+# Configure via the environment:
+#   RECEIPTS     receipt directory (required)
+#   G2H_API_KEY  api key; or use an agent key file via G2H_ARGS
+#   G2H_ARGS     extra g2h args, e.g. --key-file /path/to/key or --profile X
+#   POLL_SECONDS how long to sleep between passes (default 300)
+#
+# The api key is read from the environment or a key file only: it never
+# appears in argv, logs or output.
+
+set -eu
+
+: "${RECEIPTS:?set RECEIPTS to your receipt directory}"
+: "${POLL_SECONDS:=300}"
+: "${G2H_ARGS:=}"
+
+while :; do
+    for receipt in "$RECEIPTS"/*.json; do
+        [ -f "$receipt" ] || continue
+        if g2h wait $G2H_ARGS --receipt "$receipt"; then
+            :
+        else
+            code=$?
+            case "$code" in
+            16) printf 'human control required, receipt: %s\n' "$receipt" ;;
+            14) : 'still running; keep the receipt for the next pass' ;;
+            *) printf 'receipt %s settled with exit code: %s\n' "$receipt" "$code" ;;
+            esac
+        fi
+    done
+    sleep "$POLL_SECONDS"
+done
