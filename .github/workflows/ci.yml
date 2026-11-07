@@ -29,8 +29,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ["3.9", "3.12"]
+        # ubuntu-latest (26.04) ships no CPython 3.9 builds in setup-python,
+        # so the 3.9 leg is pinned to ubuntu-22.04 where builds exist.
+        include:
+          - os: ubuntu-22.04
+            python-version: "3.9"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.9"
+          - os: macos-latest
+            python-version: "3.12"
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
