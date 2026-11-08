@@ -21,6 +21,16 @@ It is NOT: a migration tool, a framework, a dashboard, a hosted service, a
 team wrapper, or a library with API promises. It adds no auto-anything: no
 auto-merge, no auto-approve, no auto-retry of caller errors.
 
+## Architecture
+
+![Architecture diagram: Grok Bot and example adapters dispatch tasks through the g2h CLI over a bearer-authenticated loopback HTTP connection to the local Hermes Agent gateway Runs API, with crash-safe 0600 receipts, exit codes as the control plane, per-profile routing, and a manual human approval flow.](docs/architecture/grokbot2hermes.svg)
+
+The editable source is `docs/architecture/grokbot2hermes.drawio`. Open it
+at https://app.diagrams.net (draw.io) or in the draw.io desktop app, edit,
+and export an updated SVG preview over `docs/architecture/grokbot2hermes.svg`
+so the two stay in sync. The diagram shows only shipped behavior;
+unimplemented ideas are deliberately not drawn.
+
 ## Requirements
 
 - Python 3.9+ on macOS or Linux.
@@ -168,6 +178,13 @@ completed. Receipts were 0600 in a 0700 directory, and the api key
 appeared in no output, receipt or log. Stop, replay, wrong-key and
 wrong-profile paths were verified against the mock suite, not against
 real runs.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, the exact lint and
+test commands CI runs, how the mock gateway in `tests/mock_hermes.py`
+works, optional live testing against your own local gateway, and the
+branch and pull request process.
 
 ## Licence and attribution
 
