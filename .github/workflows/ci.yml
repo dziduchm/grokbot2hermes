@@ -1,0 +1,93 @@
+# Continuous integration: lint, unit tests with the mock gateway, a byte
+# scan for em/en dashes on every tracked file, and a full-history secret
+# scan. Every "uses:" step is pinned to a full 40-char commit SHA with the
+# resolved tag named in a comment (no floating @vN refs, no secrets here).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned ruff (development-only linter)
+        run: python -m pip install "ruff==0.15.8"
+      - name: Lint client and tests (rules E, F, W)
+        run: ruff check g2h.py tests/
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest (26.04) ships no CPython 3.9 builds in setup-python,
+        # so the 3.9 leg is pinned to ubuntu-22.04 where builds exist.
+        include:
+          - os: ubuntu-22.04
+            python-version: "3.9"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.9"
+          - os: macos-latest
+            python-version: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run the unittest suite against the mock gateway
+        run: python -m unittest discover -s tests -v
+
+  dash-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - name: Byte scan every tracked file for U+2014 and U+2013
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import sys
+
+          files = subprocess.run(["git", "ls-files", "-z"], check=True,
+                                 capture_output=True).stdout.split(b"\0")
+          offenders = []
+          for name in (f.decode("utf-8") for f in files if f):
+              with open(name, "rb") as handle:
+                  data = handle.read()
+              for tag, needle in (("em dash", b"\xe2\x80\x94"),
+                                  ("en dash", b"\xe2\x80\x93")):
+                  offset = data.find(needle)
+                  if offset != -1:
+                      offenders.append("%s: %s at byte %d" % (name, tag, offset))
+          if offenders:
+              print("\n".join(offenders), file=sys.stderr)
+              sys.exit(1)
+          print("dash scan: 0 hits across %d tracked files" % len(
+              [f for f in files if f]))
+          PY
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          fetch-depth: 0
+      - name: Gitleaks full-history scan (default rules, empty allowlist)
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7  # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

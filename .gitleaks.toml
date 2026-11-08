@@ -1,0 +1,9 @@
+# Gitleaks configuration: default rules active, allowlist intentionally
+# EMPTY. Any allowlist entry requires an owner review first.
+
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "Intentionally empty allowlist: entries require owner review"
+  paths = []
