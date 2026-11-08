@@ -10,6 +10,7 @@ import json
 import os
 import secrets
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -391,6 +392,9 @@ class FixtureCase(unittest.TestCase):
                            "needs approval")
         self.assertEqual(proc.returncode, 16)
         payload = self.json_out(proc)
+        # The whole stdout stream must stay one JSON document in --json
+        # mode: no pretty-printed controls on top of the payload.
+        self.assertEqual(json.loads(proc.stdout), payload)
         self.assertEqual(payload["pending_controls"],
                          self.mock.config.pending_controls_sample)
         self.assertIn("resolve approval", proc.stderr)
@@ -492,6 +496,79 @@ class FixtureCase(unittest.TestCase):
         self.assertEqual(waited.returncode, 0, waited.stderr)
         self.assertEqual(self.json_out(waited)["status"], "completed")
         self.assertEqual(self.mock.config.create_attempts, 1)
+
+    # -----------------------------------------------------------------
+    # Gateway down: connection refused is exit 18, never "a g2h bug".
+    # -----------------------------------------------------------------
+
+    def _closed_port_base_url(self):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        return "http://127.0.0.1:%d" % port
+
+    def test_20_gateway_down_exit_18_dispatch_and_status(self):
+        # A refused connection exhausts the retry budget: dispatch is run
+        # with --max-retries 1 so the backoff is short; status polls with
+        # its built-in budget of 8 and sleeps through the backoff curve.
+        base = self._closed_port_base_url()
+        dispatch = self.client("dispatch", "--json", "--base-url", base,
+                               "--max-retries", "1",
+                               "--input", "gateway down probe", timeout=240)
+        self.assertEqual(dispatch.returncode, 18, dispatch.stderr)
+        payload = self.json_out(dispatch)
+        self.assertEqual(payload["exit_code"], 18)
+        self.assertIn("reachability", payload["error"])
+        self.assertIn("reachability", dispatch.stderr)
+        self.assert_key_absent_everywhere(dispatch, self.key)
+
+        status = self.client("status", "--json", "--base-url", base,
+                             "run_refused0001", timeout=240)
+        self.assertEqual(status.returncode, 18, status.stderr)
+        payload = self.json_out(status)
+        self.assertEqual(payload["exit_code"], 18)
+        self.assertIn("reachability", payload["error"])
+        self.assert_key_absent_everywhere(status, self.key)
+        self.assertEqual(self.mock.config.total_requests, 0)
+
+    # -----------------------------------------------------------------
+    # Mock knob: a first create answering 200 is accepted like 202.
+    # -----------------------------------------------------------------
+
+    def test_21_create_200_accepted(self):
+        self.start_mock(create_status=200)
+        proc = self.client("dispatch", "--json", "--input", "plain 200 create")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.json_out(proc)["status"], "completed")
+        self.assertEqual(self.mock.config.create_attempts, 1)
+        self.assertEqual(len(self.mock.config.runs), 1)
+
+    # -----------------------------------------------------------------
+    # Mock knob: a stop answering 202 is accepted like 200.
+    # -----------------------------------------------------------------
+
+    def test_22_stop_202_accepted(self):
+        self.start_mock(stop_status=202)
+        first = self.client("dispatch", "--json", "--no-wait", "--input",
+                            "long running task")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        run_id = self.json_out(first)["run_id"]
+        proc = self.client("stop", "--json", run_id)
+        self.assertEqual(proc.returncode, 6, proc.stderr)
+        self.assertEqual(self.json_out(proc)["status"], "cancelled")
+        self.assertEqual(self.mock.config.stop_requests, 1)
+
+    # -----------------------------------------------------------------
+    # --key-stdin together with --stdin is a usage error, reads nothing.
+    # -----------------------------------------------------------------
+
+    def test_23_key_stdin_with_stdin_is_usage_error(self):
+        proc = self.client("dispatch", "--json", "--key-stdin", "--stdin")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("--key-stdin", proc.stderr)
+        self.assertIn("--stdin", proc.stderr)
+        self.assertEqual(self.mock.config.total_requests, 0)
 
 
 if __name__ == "__main__":

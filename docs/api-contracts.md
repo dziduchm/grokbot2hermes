@@ -153,6 +153,8 @@ own: they exist so a human can unblock `waiting_for_approval` runs.
 ## Implementation notes (documented behaviors the upstream doc leaves open)
 
 - A first create returning 200 or 202 is accepted as success either way.
+- A stop reply of 200 or 202 is accepted as success; the upstream doc
+  does not pin the stop success status.
 - `Retry-After` is treated as optional on 429 and 503.
 - Create replies: only `run_id` is parsed; anything else is ignored.
 - `pending_controls` entries are printed verbatim; fields beyond

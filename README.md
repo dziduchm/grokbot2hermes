@@ -71,7 +71,7 @@ prose. The table is the single source of truth; it is mirrored in
 
 | Code | Meaning | Typical trigger |
 |------|---------|-----------------|
-| 0 | completed | run reached terminal status `completed` |
+| 0 | completed, or a clean non-terminal `status` read | run reached terminal `completed`; `status` on `running`, `stopping` or `unknown` also reports 0 |
 | 1 | internal error | unexpected client bug; scrubbed traceback |
 | 2 | usage error | bad flags, empty input, invalid idempotency key chars |
 | 3 | credential or config error | key missing, key file perms not 0600, receipt dir not 0700 |
@@ -83,7 +83,7 @@ prose. The table is the single source of truth; it is mirrored in
 | 12 | idempotency conflict | HTTP 409 `idempotency_key_conflict` (same key, different payload) |
 | 13 | rate limited or unavailable | 429/503 budget exhausted after retries |
 | 14 | timeout | `--timeout` expired while non-terminal (includes parked `unknown`) |
-| 16 | awaiting human control | `waiting_for_approval` / `pending_controls` observed |
+| 16 | awaiting human control | `waiting_for_approval` / `pending_controls` observed by dispatch, wait or status |
 | 18 | transport error | connection failures after retry budget |
 
 Note: 409 `permission_denied` (a `session_id` another surface owns)

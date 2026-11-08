@@ -40,6 +40,8 @@ class MockConfig:
         self.ledger = {}        # idempotency key -> {sha256, run_id}
         self.create_failures = []   # list of (status, code, retry_after)
         self.create_delay = 0.0
+        self.create_status = 202    # first-create success status
+        self.stop_status = 200      # stop success status (doc leaves open)
         self.default_seq = ["running", "completed"]
         self.default_output = "MOCK_RUN_OUTPUT"
         self.caps_status = 200
@@ -278,9 +280,9 @@ class MockHandler(BaseHTTPRequestHandler):
                 config.ledger[idem] = {"sha256": sha, "run_id": run_id}
         if config.create_delay:
             time.sleep(config.create_delay)  # reserve before work: 2.3
-        return self._send_json(202, {"object": "hermes.run",
-                                     "run_id": run_id, "status": "started",
-                                     "session_id": state.session_id})
+        payload = {"object": "hermes.run", "run_id": run_id,
+                   "status": "started", "session_id": state.session_id}
+        return self._send_json(config.create_status, payload)
 
     def _status(self, config, profile, run_id):
         state = config.runs.get(run_id)
@@ -297,7 +299,8 @@ class MockHandler(BaseHTTPRequestHandler):
                 "code": "unknown_execution"}})
         state.stop_requested = True
         state.stop_seq = list(config.stop_seq)
-        return self._send_json(200, {"run_id": run_id, "status": "stopping"})
+        return self._send_json(config.stop_status,
+                               {"run_id": run_id, "status": "stopping"})
 
     def _events(self, config, profile, run_id):
         state = config.runs.get(run_id)

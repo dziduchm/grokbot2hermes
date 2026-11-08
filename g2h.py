@@ -673,7 +673,7 @@ def stop_run(cfg: Config, ctx: Ctx, key: str, run_id: str,
         cfg, ctx, "POST", cfg.api_url("v1/runs/%s/stop" % run_id),
         extra_headers=auth_headers(key), max_retries=max_retries,
         what="run stop")
-    if status != 200:
+    if status not in (200, 202):
         map_http_error(ctx, status, text, "run stop")
     return parse_json_object(ctx, text, "run stop")
 
@@ -768,8 +768,8 @@ def fail_wait_controls(ctx: Ctx, run_id: str, controls, base_payload: dict,
         receipt_doc["updated_at"] = utc_now()
         if receipt_path:
             write_receipt(ctx, receipt_path, receipt_doc)
-    if controls is not None:
-        _print_controls(controls)
+    if controls is not None and not ctx.json_mode:
+        _print_controls(controls)  # --json carries them in the payload
     request_id = ""
     generation = ""
     if isinstance(controls, list):
@@ -992,6 +992,10 @@ def output_cap(json_mode: bool) -> int:
 
 
 def cmd_dispatch(cfg: Config, ctx: Ctx, args) -> int:
+    if args.key_stdin and args.stdin:
+        ctx.die(EXIT_USAGE,
+                "--key-stdin consumes stdin for the api key, so it cannot "
+                "be combined with --stdin input (use --input or --input-file)")
     key = resolve_key(ctx, args)
     text = resolve_input(ctx, args)
     if not text.strip():
@@ -1056,12 +1060,18 @@ def cmd_status(cfg: Config, ctx: Ctx, args) -> int:
         write_receipt(ctx, receipt_path, doc)
     status = status_doc["status"]
     code = EXIT_BY_STATUS.get(status, EXIT_OK)
+    # waiting_for_approval observed by this one-shot query is a human
+    # control: exit 16, the same contract dispatch and wait use.
+    if status == "waiting_for_approval" or status_doc.get("pending_controls"):
+        code = EXIT_HUMAN
     output, truncated = trunc_output(doc if doc else status_doc,
                                      output_cap(ctx.json_mode))
     payload = {"run_id": run_id, "status": status, "output": output,
                "output_truncated": truncated,
                "usage": status_doc.get("usage"),
-               "runtime": status_doc.get("runtime"), "detail": status_doc}
+               "runtime": status_doc.get("runtime"),
+               "pending_controls": status_doc.get("pending_controls"),
+               "detail": status_doc}
     if receipt_path:
         payload["receipt_path"] = receipt_path
     lines = ["run_id: %s" % run_id, "status: %s" % status]
@@ -1291,6 +1301,16 @@ def main(argv=None) -> None:
         code = HANDLERS[args.command](cfg, ctx, args)
     except G2hExit as exc:
         code = exc.code
+    except TransportError as exc:
+        # Transport failures are the control plane, not bugs: every command
+        # dies EXIT_TRANSPORT at the retry budget (README exit table).
+        message = ("transport failure after retries: %s; check gateway "
+                   "reachability: is the gateway running, and is --base-url "
+                   "or G2H_BASE_URL correct?" % scrub(str(exc)))
+        ctx.diagnostic("transport_error", message)
+        ctx.warn(message)
+        ctx.emit({"error": message, "exit_code": EXIT_TRANSPORT})
+        code = EXIT_TRANSPORT
     except KeyboardInterrupt:
         ctx.warn("interrupted by user")
         code = 130
