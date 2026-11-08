@@ -230,6 +230,17 @@ and a `gateway` block (state and transition log). The ledger is the
 restart-safe source of truth: a control reported once stays reported
 across process restarts and is never re-emitted until it resolves.
 
+### Dashboard snapshot additions (keyless receipts-only)
+
+The `--json` snapshot gains a top-level `gateway_contact` string: the
+ledger's gateway state (`ok` or `failing`) for any contacted pass, or
+the literal `not-contacted` for a pass run without any key. A keyless
+pass reads the local receipt store only: it makes no gateway request of
+any kind, adds a receipts-only limitation entry to the snapshot's
+`limitations` list, and writes nothing beyond the local event
+directory. Serve mode always requires the key because it polls, so a
+rendered page is the only keyless surface and it stays loopback-only.
+
 ### Notifier contract
 
 Delivery happens after a pass persists events. Webhook: POST of the event

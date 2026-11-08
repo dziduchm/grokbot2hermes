@@ -13,6 +13,8 @@ allowlist limited to the loopback host names for the bound port.
 
 import html as _html
 import json
+import socket
+import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -158,7 +160,8 @@ def render_html(snapshot: dict, error=None, refresh: float = 0.0) -> str:
     parts.append("<span>%s</span>" % esc(snapshot.get("notifier")))
     parts.append("<span>profile: %s</span>" % esc(snapshot.get("profile")))
     parts.append("<span>gateway: %s</span>"
-                 % esc(gateway.get("state") or "ok"))
+                 % esc(snapshot.get("gateway_contact")
+                       or gateway.get("state") or "ok"))
     parts.append("<span>generated at: %s</span>"
                  % esc(snapshot.get("generated_at")))
     parts.append("<span>freshness window: %s</span>"
@@ -204,6 +207,21 @@ def render_html(snapshot: dict, error=None, refresh: float = 0.0) -> str:
 class _DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
     allowed_hosts: frozenset = frozenset()
+    address_family = socket.AF_INET
+    server_name: str
+
+    def server_bind(self) -> None:
+        # Bind without reverse DNS: BaseServer.server_bind calls
+        # socket.getfqdn, which for 127.0.0.1 performs a live PTR query
+        # (on macOS it resolves to an in-addr.arpa name) and stalls long
+        # past the readiness budget on sandboxed runner resolvers. A
+        # loopback dashboard needs no advertised hostname.
+        if self.allow_reuse_address:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(self.server_address)
+        self.server_address = self.socket.getsockname()
+        self.server_name = str(self.server_address[0])
+        self.server_port = self.server_address[1]
 
 
 def serve_dashboard(port: int, version: str, allowed_hosts, page_fn) -> None:
@@ -289,7 +307,11 @@ def serve_dashboard(port: int, version: str, allowed_hosts, page_fn) -> None:
             self._reply(405, "text/plain; charset=utf-8", b"",
                         allow_get=True)
 
+    sys.stderr.write("g2h-dashboard: binding 127.0.0.1:%d\n" % port)
+    sys.stderr.flush()
     server = _DashboardServer(("127.0.0.1", port), Handler)
+    sys.stderr.write("g2h-dashboard: listening on 127.0.0.1:%d\n" % port)
+    sys.stderr.flush()
     server.allowed_hosts = frozenset(allowed_hosts)
     try:
         server.serve_forever(poll_interval=0.25)

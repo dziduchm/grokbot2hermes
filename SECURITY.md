@@ -34,7 +34,11 @@ Design notes enforced by this repository:
 - The dashboard is loopback-only, GET-only, and header-locked: no auth
   layer is added on purpose because there is nothing to authorize
   locally; the loopback bind plus the read-only code path is the whole
-  boundary. It is opt-in and off unless run.
+  boundary. It is opt-in and off unless run. Without a key its static
+  render mode reads the 0600 receipts only and never contacts the
+  gateway (the page labels itself `not-contacted`); serve mode always
+  requires the key because it polls, so no remote capability exists
+  without credentials.
 - The relay writes 0600 event files and a 0600 ledger in the same 0700
   directory and never mutates a receipt. One optional notifier
   destination, configured only by the operator; its URL, command and

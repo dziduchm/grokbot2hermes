@@ -146,9 +146,17 @@ never touches controls. It reads the same 0600 receipts; it is not an
 auth layer, a remote console, or a second control plane, and it is off
 unless you run it.
 
+The key is only needed for `--serve`, because serve mode polls the
+gateway while it runs. Without any key, the static surfaces (`--out`,
+`--json`, or stdout) still render the local receipt store: the pass
+skips every gateway read, shows `gateway: not-contacted` and adds a
+receipts-only limitation to the page, so nothing remote happens and
+nothing is sent anywhere. Serve mode never starts without a key, so
+there is no remote access without credentials.
+
 ```console
 $ ./g2h dashboard --out snapshot.html   # render one static page, exit
-$ ./g2h dashboard --serve               # serve and poll until Ctrl+C
+$ ./g2h dashboard --serve               # serve and poll until Ctrl+C (key required)
 ```
 
 | Flag | Default | Meaning |

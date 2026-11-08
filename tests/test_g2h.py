@@ -715,10 +715,30 @@ class DashboardRelayCase(FixtureCase):
                 break
             except (ConnectionError, urllib.error.URLError):
                 time.sleep(0.2)
-        self.assertIsNotNone(
-            page, "mock serve never answered GET / (exit=%s, log=%s)"
-            % (proc.poll(), log_path))
+        if page is None:
+            self.fail(self._serve_failure(proc, log_path))
         return proc, port
+
+    def _scrub_text(self, text):
+        scrubbed = text
+        for value in (self.key, getattr(self.mock, "base_url", None)):
+            if value and value in scrubbed:
+                scrubbed = scrubbed.replace(value, "<scrubbed>")
+        return scrubbed
+
+    def _serve_failure(self, proc, log_path):
+        state = "still alive" if proc.poll() is None else "exited %s" % proc.poll()
+        detail = ""
+        try:
+            with open(log_path, "r", encoding="utf-8",
+                      errors="replace") as handle:
+                raw = handle.read()
+            tail = self._scrub_text(raw)[-2000:]
+            detail = (", log=%s (%d bytes, scrubbed tail follows):\n%s"
+                      % (log_path, len(raw), tail))
+        except OSError as exc:
+            detail = (", log=%s (unreadable: %s)" % (log_path, exc))
+        return "mock serve never answered GET / (%s%s)" % (state, detail)
 
     @staticmethod
     def _stop_serve(proc):
@@ -1424,6 +1444,43 @@ class DashboardRelayCase(FixtureCase):
         self.assertEqual(after["legacy_untouched"], "keep")
         self.assertTrue(after.get("last_error"))
         self.assert_no_control_posts("legacy-receipt dashboard pass")
+
+    def test_44_dashboard_mock_out_keyless_receipts_only(self):
+        out_path = os.path.join(self.ws, "mock-keyless-empty.html")
+        proc = self.client("dashboard", "--out", out_path, key="")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("no gateway contact will be made", proc.stderr)
+        with open(out_path, "r", encoding="utf-8") as handle:
+            html = handle.read()
+        self.assertIn("No receipts yet", html)
+        self.assertIn("notifier: none (local only)", html)
+        self.assertIn("gateway: not-contacted", html)
+        self.assertIn("the gateway was never contacted", html)
+        self.assertEqual(self.status_reads(), [])
+        self.assert_no_control_posts("keyless out render")
+
+    def test_45_dashboard_mock_serve_keyless_exits_credential(self):
+        proc = self.client("dashboard", "--serve", key="")
+        self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+        self.assertIn("no api key found", proc.stderr)
+        self.assertEqual(self.status_reads(), [])
+        self.assert_no_control_posts("keyless serve")
+
+    def test_46_dashboard_mock_out_keyless_with_receipts(self):
+        proc = self.client("dispatch", "--json", "--input",
+                           "mock keyless page")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.clear_recorder()
+        out_path = os.path.join(self.ws, "mock-keyless-page.html")
+        proc = self.client("dashboard", "--out", out_path, key="")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(out_path, "r", encoding="utf-8") as handle:
+            html = handle.read()
+        self.assertIn("mock keyless page", html)
+        self.assertIn("gateway: not-contacted", html)
+        self.assertIn("the gateway was never contacted", html)
+        self.assertEqual(self.status_reads(), [])
+        self.assert_no_control_posts("keyless out with receipts")
 
 
 def _free_loopback_port():

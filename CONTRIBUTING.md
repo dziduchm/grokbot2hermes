@@ -138,6 +138,10 @@ than aspirational:
    stderr captured to a log file, waits for HTTP readiness, and
    guarantees shutdown via `addCleanup`. The readiness wait tolerates
    connection errors while the child boots; the deadline is 10 seconds.
+   If readiness fails, the assertion embeds the child's bounded,
+   scrubbed stderr tail (key and mock url replaced by `<scrubbed>`
+   entries) and whether the child is still alive or already exited, so
+   a stalled boot is identifiable from CI logs alone.
 
 ## Optional: live testing against your own gateway
 
@@ -166,7 +170,10 @@ surface touched):
 2. `$ ./g2h dispatch --key-stdin --profile <name> --json --input "<your
    task>"` and let it reach a terminal state.
 3. `$ ./g2h dashboard --out /tmp/g2h-smoke.html` and open it in a local
-   browser; confirm your run appears with receipts untouched.
+   browser; confirm your run appears with receipts untouched. This step
+   also works without any key (receipts-only render, page labels itself
+   `gateway: not-contacted`); `dashboard --serve` needs the key because
+   it polls.
 4. `$ ./g2h relay --once --json` with no notifier configured; confirm the
    event payload and exit code.
 

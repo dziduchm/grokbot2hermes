@@ -1259,6 +1259,10 @@ _LIMITATIONS = (
     "plain session-chat human gates are not relayable: only run-scoped "
     "approvals surface pending controls",
 )
+RECEIPTS_ONLY_NOTE = (
+    "no api key was provided: this pass read the local receipt store only; "
+    "the gateway was never contacted and no run state was refreshed"
+)
 
 _PR_LINK_RE = re.compile(
     r"(?:https?://)?github\.com/([A-Za-z0-9_.-]+?)/([A-Za-z0-9_.-]+?)/pull/"
@@ -1745,9 +1749,13 @@ def _poll_read_failed(ctx: Ctx, path: str, receipt: dict, message: str) -> None:
     write_receipt(ctx, path, receipt)
 
 
-def poll_pass(cfg: Config, ctx: Ctx, key: str, max_runs: int) -> dict:
+def poll_pass(cfg: Config, ctx: Ctx, key: str, max_runs: int,
+              contact: bool = True) -> dict:
     """One observation pass: GET run status only; local files are the only
-    writes. Used by dashboard, relay and their serve/watch loops."""
+    writes. Used by dashboard, relay and their serve/watch loops. With
+    contact=False (keyless receipt-only dashboards) the run status fetch
+    step is skipped entirely: every non-run receipt row is rendered from
+    the receipt alone and no gateway request of any kind is made."""
     contacts = 0
     failures = 0
     total = 0
@@ -1767,6 +1775,9 @@ def poll_pass(cfg: Config, ctx: Ctx, key: str, max_runs: int) -> dict:
         name = os.path.basename(path)
         run_id = receipt.get("run_id")
         if not isinstance(run_id, str) or not run_id:
+            rows.append(_row_base(receipt, name, cfg))
+            continue
+        if not contact:
             rows.append(_row_base(receipt, name, cfg))
             continue
         status = receipt.get("status")
@@ -1928,7 +1939,7 @@ def _blockers(row: dict, stale_flag: bool, entries: dict) -> list:
 def build_snapshot(cfg: Config, rows: list, ledger: dict, dest_kind: str,
                    contacts: int, failures: int, attempted: int,
                    freshness_interval: float, receipts_total: int,
-                   max_runs: int) -> dict:
+                   max_runs: int, receipts_only: bool = False) -> dict:
     entries = ledger.get("entries") or {}
     runs = []
     for row in rows:
@@ -1946,6 +1957,9 @@ def build_snapshot(cfg: Config, rows: list, ledger: dict, dest_kind: str,
         finalized["open_controls"] = len(decisions)
         runs.append(finalized)
     gateway = ledger.get("gateway") or {}
+    limitations: list = list(_LIMITATIONS)
+    if receipts_only:
+        limitations.append(RECEIPTS_ONLY_NOTE)
     return {
         "version": 1,
         "tool": "grokbot2hermes",
@@ -1956,6 +1970,8 @@ def build_snapshot(cfg: Config, rows: list, ledger: dict, dest_kind: str,
                     "last_transition_at": gateway.get("last_transition_at"),
                     "contacts": contacts, "failures": failures,
                     "attempted": attempted},
+        "gateway_contact": "not-contacted" if receipts_only
+        else (gateway.get("state") or GATEWAY_OK),
         "notifier": NOTIFIER_LABELS.get(dest_kind, NOTIFIER_LABELS["none"]),
         "counts": {"shown": len(runs),
                    "hidden": max(0, receipts_total - len(runs)),
@@ -1963,7 +1979,7 @@ def build_snapshot(cfg: Config, rows: list, ledger: dict, dest_kind: str,
                    "open_decisions": sum(len(r["decisions"]) for r in runs)},
         "freshness_window_seconds": FRESH_INTERVALS
         * max(0.0, freshness_interval),
-        "limitations": list(_LIMITATIONS),
+        "limitations": limitations,
         "runs": runs,
     }
 
@@ -2374,16 +2390,33 @@ def _validate_relay_flags(ctx: Ctx, args) -> None:
 
 
 def cmd_dashboard(cfg: Config, ctx: Ctx, args) -> int:
-    key = resolve_key(ctx, args)
     _validate_dashboard_flags(ctx, args)
-    if args.serve:
-        return _serve_dashboard(cfg, ctx, key, args)
+    serve_mode = bool(args.serve)
+    # Serve mode polls the gateway continuously, so it always needs the
+    # key: no remote capability without credentials. The snapshot surfaces
+    # below are purely local reads of the receipt store; there the key is
+    # optional and, when absent, contact=False keeps every gateway request
+    # off the wire.
+    if (serve_mode or args.key_stdin or args.key_file
+            or (os.environ.get("G2H_API_KEY") or "").strip()):
+        key = resolve_key(ctx, args)
+        if serve_mode:
+            # serve mode polls the gateway continuously: keyed only
+            return _serve_dashboard(cfg, ctx, key, args)
+        contact = True
+    else:
+        key = None
+        contact = False
+        ctx.warn("no api key found: rendering the receipt store only; "
+                 "no gateway contact will be made")
     dest_kind, _value = resolve_notifier_destination(ctx, args)
-    outcome = poll_pass(cfg, ctx, key, max_runs=args.max_runs)
+    outcome = poll_pass(cfg, ctx, key or "", max_runs=args.max_runs,
+                        contact=contact)
     snapshot = build_snapshot(
         cfg, outcome["rows"], outcome["ledger"], dest_kind,
         outcome["contacts"], outcome["failures"], outcome["attempted"],
-        args.poll_interval, outcome["receipts_total"], args.max_runs)
+        args.poll_interval, outcome["receipts_total"], args.max_runs,
+        receipts_only=not contact)
     code = EXIT_TRANSPORT if _transport_dead(outcome) else EXIT_OK
     if args.out:
         text = json.dumps(snapshot, sort_keys=True, indent=2) \
