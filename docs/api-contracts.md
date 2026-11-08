@@ -165,3 +165,106 @@ own: they exist so a human can unblock `waiting_for_approval` runs.
   documented section; g2h never calls it.
 - A 404 from the unprefixed path `/p/<profile>/v1/capabilities` is treated
   as a profile routing error (exit 11) with a hint about the prefix.
+
+## Local contracts: receipt extensions, event documents, notifier
+
+The fields below are g2h-local file formats (not gateway HTTP): receipts
+written by g2h and consumed by the dashboard and relay. They carry
+`"version": 1` and `"tool": "grokbot2hermes"`.
+
+### Receipt additions (version 1 receipts)
+
+Receipts stay `"version": 1` forever; this PR only adds keys, and every
+consumer tolerates unknown keys (proven by a regression test that feeds
+a legacy receipt with extra keys through a full read). Dispatch and the
+status polling pass may update receipts with:
+
+```json
+{"version": 1,
+ "pending_controls": [{"prompt_id": "...", "execution_generation": 4,
+                       "...other gateway fields...": null}],
+ "last_ok_at": "2026-01-01T00:00:00Z",
+ "last_error": "HTTP 404 for GET /v1/runs/run_x: not found",
+ "last_event": {"name": "approval.requested", "at": "2026-01-01T00:05:00Z",
+                "snippet": "<capped status snapshot>"}}
+```
+
+`pending_controls` is `null` when the last known state had none and a
+list while waiting (written at dispatch and refreshed from the status
+read). `last_ok_at` is stamped and `last_error` cleared on every
+successful status read; a failed read writes `last_error` (scrubbed of
+the key, capped at 200 characters) and leaves the previously observed
+data untouched. `last_event` names the most recent status change or
+relay event with a short snippet. Unknown gateway fields inside a
+control element are preserved verbatim and never interpreted; the relay
+only reads `prompt_id`, `execution_generation` and the element's `kind`
+shape.
+
+### Relay event document (schema v1)
+
+One JSON file per event, `receipts/events/<UTC stamp>-<sha8>.json`,
+mode 0600:
+
+```json
+{"version": 1,
+ "tool": "grokbot2hermes",
+ "kind": "approval.requested",
+ "profile": "default",
+ "base_url": "http://127.0.0.1:8642",
+ "run_id": "run_abc123",
+ "receipt": "run-2026...-abc123.json",
+ "task": {"text": "...", "created_at": "2026-01-01T00:00:00Z"},
+ "control": {"request_id": "...", "execution_generation": 4,
+             "kind": "approval", "context": "<scrubbed json, capped>",
+             "expiry": "..."},
+ "resolution": null,
+ "dedup_key": "<sha256 of run_id:prompt_id:execution_generation>",
+ "first_seen_at": "2026-01-01T00:00:00Z",
+ "observed_at": "2026-01-01T00:05:00Z",
+ "source": "GET /v1/runs/run_abc123 pending_controls"}
+```
+
+Kinds: `approval.requested`, `approval.resolved` (with `resolution` one
+of `answered`, `expired`, `withdrawn`, `resolved_unknown`),
+`run.terminal` (run id and task present, no `control`; the run's last
+known status stays in the receipt), `gateway.unreachable` (no run id).
+`task.text` and `control.context` are scrubbed of the api key before
+write.
+
+### Dedup ledger (approvals.json)
+
+`receipts/approvals.json`, mode 0600, one JSON object holding `entries`
+keyed by `dedup_key` (state `seen`, `delivered`, `notify_failed` or
+`resolved`; delivery metadata, request identity, `first_seen_at` /
+`last_seen_at` / `delivered_at`, `source_event`), `deliveries` keyed by
+event file name (attempts, delivered_at, last_error, kind, dedup_key),
+and a `gateway` block (state and transition log). The ledger is the
+restart-safe source of truth: a control reported once stays reported
+across process restarts and is never re-emitted until it resolves.
+
+### Dashboard snapshot additions (keyless receipts-only)
+
+The `--json` snapshot gains a top-level `gateway_contact` string: the
+ledger's gateway state (`ok` or `failing`) for any contacted pass, or
+the literal `not-contacted` for a pass run without any key. A keyless
+pass reads the local receipt store only: it makes no gateway request of
+any kind, adds a receipts-only limitation entry to the snapshot's
+`limitations` list, and writes nothing beyond the local event
+directory. Serve mode always requires the key because it polls, so a
+rendered page is the only keyless surface and it stays loopback-only.
+
+### Notifier contract
+
+Delivery happens after a pass persists events. Webhook: POST of the event
+JSON to the configured URL, `Content-Type: application/json`, an
+`Authorization: Bearer` header carrying the token from
+`G2H_NOTIFY_TOKEN` (required
+for any webhook destination). The destination must return 2xx; anything
+else, a transport error or a 10 second timeout records one failed attempt
+(`notify_failed`) with the error text (token value never included).
+Command: the event JSON on stdin; exit 0 delivered, any other exit
+failed; 10 second timeout. Exactly one destination: if a URL and a
+command both resolve, g2h exits with a usage error; a CLI flag beats a
+same-kind env var (`--notify-url` vs `G2H_NOTIFY_URL`, `--notify-cmd` vs
+`G2H_NOTIFY_CMD`). No destination means no delivery attempt, and the
+only retry is the human-initiated `--redeliver`.

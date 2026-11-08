@@ -15,11 +15,14 @@ It IS: a small Python 3.9+ command line client, `g2h`, single file plus a
 three line launcher, standard library only. It dispatches a task to a
 Hermes Agent gateway's Runs API, tracks it to a terminal state, writes a
 crash-safe receipt, reports by exit code, and leaves human approvals to
-humans.
+humans. Two opt-in observers sit on top of the receipt store: a local
+read-only dashboard and an approval event relay with one optional
+notifier destination.
 
-It is NOT: a migration tool, a framework, a dashboard, a hosted service, a
-team wrapper, or a library with API promises. It adds no auto-anything: no
-auto-merge, no auto-approve, no auto-retry of caller errors.
+It is NOT: a migration tool, a framework, a hosted service, a hosted
+dashboard, a team wrapper, or a library with API promises. It adds no
+auto-anything: no auto-merge, no auto-approve, no auto-retry of caller
+errors, no automatic notifier retries either.
 
 ## Architecture
 
@@ -129,6 +132,92 @@ again; the task did not vanish.
 Adapters that auto-dispatch tasks (the "Grok Bot" side) should read
 docs/adapters/grokbot.md, including the never-auto-answer rules for human
 controls.
+
+## Local dashboard (opt-in, read-only)
+
+`g2h dashboard` renders an HTML view over the receipts g2h itself owns.
+It is for the operator sitting at the same machine: it binds to loopback
+only (the `--bind` values `127.0.0.1` and `localhost` are the only ones
+accepted), answers GET requests only, sets
+`Content-Security-Policy: default-src 'none'; style-src 'self'` and
+`X-Content-Type-Options: nosniff`, ships no JavaScript, cookies, sessions
+or forms, and never mutates anything: it never POSTs to the gateway and
+never touches controls. It reads the same 0600 receipts; it is not an
+auth layer, a remote console, or a second control plane, and it is off
+unless you run it.
+
+The key is only needed for `--serve`, because serve mode polls the
+gateway while it runs. Without any key, the static surfaces (`--out`,
+`--json`, or stdout) still render the local receipt store: the pass
+skips every gateway read, shows `gateway: not-contacted` and adds a
+receipts-only limitation to the page, so nothing remote happens and
+nothing is sent anywhere. Serve mode never starts without a key, so
+there is no remote access without credentials.
+
+```console
+$ ./g2h dashboard --out snapshot.html   # render one static page, exit
+$ ./g2h dashboard --serve               # serve and poll until Ctrl+C (key required)
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--serve` | off | serve on loopback and poll (default prints once) |
+| `--out FILE` | stdout | write the snapshot to FILE |
+| `--port N` | 8790 or `G2H_DASHBOARD_PORT` | serve port |
+| `--bind HOST` | 127.0.0.1 | loopback only: 127.0.0.1 or localhost |
+| `--refresh SECS` | 10 | page meta refresh; 0 disables (min 5) |
+| `--poll-interval SECS` | 15 | serve-mode gateway poll (min 5) |
+| `--max-runs N` | 50 | newest N receipts shown, the rest summarized |
+
+## Approval event relay
+
+`g2h relay` turns receipts into a small, local event history for
+automation watchers. One pass reads each receipt's current state and
+writes events next to the receipts (one 0600 JSON file per event, stamped
+name in `receipts/events/`):
+
+- `approval.requested`: a pending control appeared (pending approvals
+  only; dispatched-but-approved never fires).
+- `approval.resolved`: a pending control left the pending set, with a
+  resolution: `answered`, `expired`, `withdrawn` or `resolved_unknown`
+  (vanished while the client was down).
+- `run.terminal`: a tracked run reached a terminal status.
+- `gateway.unreachable`: every contact in a pass failed.
+
+`receipts/approvals.json` is the dedup ledger (mode 0600, key = sha256 of
+run id plus the control identity): a resumed pass reports a control once,
+across restarts, and never re-fires one that was already reported. An
+entry's own files are dropped together with it by `--prune-days` (30
+default; receipts are never touched).
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--once` | default | one pass (also chosen when neither flag given) |
+| `--watch` | off | pass every `--interval` seconds until Ctrl+C |
+| `--interval SECS` | 30 | `--watch` cadence (min 10) |
+| `--notify-url URL` / `G2H_NOTIFY_URL` | unset | one webhook destination |
+| `--notify-cmd CMD` / `G2H_NOTIFY_CMD` | unset | one command destination |
+| `--redeliver PREFIX` | none | one human-initiated reattempt for one event |
+| `--prune-days N` | 30 | drop resolved entries/event files older than N |
+
+The notifier is generic and opt-in: exactly one destination (a URL and a
+command together are refused as a usage error; a CLI flag beats the
+same-kind env var), one delivery attempt per event per pass, failures
+recorded in the ledger and never retried automatically. The webhook
+receives the full event JSON with an `Authorization: Bearer` header
+carrying the token from `G2H_NOTIFY_TOKEN` (required for the webhook;
+name only in
+output; the value never appears in argv, logs or receipts); the command
+destination gets the same JSON on stdin and exit 0 means delivered. No
+destination exists by default: this repository ships no URL, no token
+and no integration endpoint, and wiring one (for example to any agent
+bus) is a separate, explicitly approved deployment decision.
+
+Exit rules: 0 when the pass ran (even with zero events), 18 when every
+gateway read failed, and the same receipt/credential/usage codes as the
+table above otherwise. `--json` adds `events`, `delivered`,
+`notify_failed`, `notifier`, `contacts`, `failures` and `pruned` to the
+payload.
 
 ## Run the tests
 

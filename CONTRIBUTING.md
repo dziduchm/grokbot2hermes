@@ -11,9 +11,11 @@ pull requests on this repository are the channel.
 ## Repo layout in one paragraph
 
 `g2h.py` is the whole client (single file, Python 3.9+ standard library
-only); `g2h` is a three line launcher for it. `tests/mock_hermes.py` is an
-in-process mock of the documented Runs API subset and `tests/test_g2h.py`
-runs the real client as a subprocess against it. `docs/api-contracts.md`
+only) except the dashboard's presentation layer, which lives in
+`g2h_ui.py`; `g2h` is a three line launcher for it.
+`tests/mock_hermes.py` is an in-process mock of the documented Runs API
+subset and `tests/test_g2h.py` runs the real client as a subprocess
+against it. `docs/api-contracts.md`
 is the HTTP contract reference, `docs/adapters/` holds adapter guidance
 (`grokbot.md`) and a polling example (`grokbot-poll.sh.example`), and
 `docs/architecture/` holds the architecture diagram (editable `.drawio`
@@ -93,13 +95,53 @@ the Runs API from `docs/api-contracts.md`:
 - `POST /v1/runs/{run_id}/stop`,
 - `POST /v1/runs/{run_id}/approval`, `/clarify` and `/resolve-unknown`
   with generation and replay-id checks, including the stale generation
-  conflicts real gateways can return.
+  conflicts real gateways can return,
+- `POST /p/[profile]/v1/notify`, a generic webhook sink that records
+  every delivery it receives (status and delay injectable), used to test
+  the relay notifier; it is deliberately outside the gateway key check
+  and returns 401 when no bearer token is sent,
+- scripted scenarios: a dispatch input of the form
+  `MOCK_SCENARIO:<label>: <task text>` binds that run to a scripted
+  status sequence (and optional pending sequence); anything that does not
+  use the prefix dispatches normally.
 
 `tests/test_g2h.py` starts a fresh mock for every test (fresh scratch
 receipt directory too) and runs the real `g2h.py` as a subprocess, then
 asserts on stdout lines, stderr diagnostics, exit codes, and the receipt
 files. Failure sequences, status sequences, retry budgets, 040x/05xx
 paths and receipt round trips are all driven through this harness.
+
+## Dashboard and relay test conventions
+
+Three rules keep the local read-only guarantees test-enforced rather
+than aspirational:
+
+1. **The negative control is the point.** `assert_no_control_posts()`
+   walks the mock's request recorder after every dashboard and relay
+   interaction and fails the test if any method but GET hit
+   `/approval`, `/clarify`, `/stop` or `/resolve-unknown`, or if the
+   dashboard/relay touched any control surface at all. Every new relay
+   or dashboard test must end with it. If a test starts failing there,
+   the engine learned a new mutation path; fix the engine, not the
+   assert.
+2. **Scenario scripts are per-run element lists.**
+   `scenario(label, seq=[...], pending_script=[...])` gives each run
+   bound to `<label>` its own copy of both lists: `seq` is a list of
+   statuses consumed one per `GET /v1/runs/{id}`, and `pending_script`
+   is a list of pending element lists, also consumed one per status
+   read while the run is waiting. An element list is a list of
+   control dicts (the dispatch-time pending shape). Count the reads:
+   dispatch makes one status read before the first relay pass, and the
+   dashboard and relay each poll.
+3. **Serve-mode tests start real sockets.** `serve()` picks a free
+   loopback port, starts `g2h dashboard --serve` as a subprocess with
+   stderr captured to a log file, waits for HTTP readiness, and
+   guarantees shutdown via `addCleanup`. The readiness wait tolerates
+   connection errors while the child boots; the deadline is 10 seconds.
+   If readiness fails, the assertion embeds the child's bounded,
+   scrubbed stderr tail (key and mock url replaced by `<scrubbed>`
+   entries) and whether the child is still alive or already exited, so
+   a stalled boot is identifiable from CI logs alone.
 
 ## Optional: live testing against your own gateway
 
@@ -119,6 +161,26 @@ server enabled, `API_SERVER_KEY` set there).
 - Prefer the mock for anything reproducible; use live testing for a final
   smoke only, and keep the sanitised details (no keys, no session ids, no
   private run contents) out of issues and pull requests.
+
+A minimal dashboard/relay live smoke (all read-only, no control
+surface touched):
+
+1. `$ ./g2h capabilities --key-stdin --profile <name>` (feed the key once
+   on stdin; never on argv, never echoed).
+2. `$ ./g2h dispatch --key-stdin --profile <name> --json --input "<your
+   task>"` and let it reach a terminal state.
+3. `$ ./g2h dashboard --out /tmp/g2h-smoke.html` and open it in a local
+   browser; confirm your run appears with receipts untouched. This step
+   also works without any key (receipts-only render, page labels itself
+   `gateway: not-contacted`); `dashboard --serve` needs the key because
+   it polls.
+4. `$ ./g2h relay --once --json` with no notifier configured; confirm the
+   event payload and exit code.
+
+If any step is blocked (gate, permission, policy), stop that step and
+record it as "not run: gate" rather than working around it. Never set a
+real notifier destination during a smoke; leave it unset and let the
+mocks prove delivery paths.
 
 ## Branch and pull request process
 

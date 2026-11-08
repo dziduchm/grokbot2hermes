@@ -40,6 +40,7 @@ class MockConfig:
         self.ledger = {}        # idempotency key -> {sha256, run_id}
         self.create_failures = []   # list of (status, code, retry_after)
         self.create_delay = 0.0
+        self.status_delay = 0.0     # per status-read delay in seconds
         self.create_status = 202    # first-create success status
         self.stop_status = 200      # stop success status (doc leaves open)
         self.default_seq = ["running", "completed"]
@@ -64,6 +65,10 @@ class MockConfig:
         ]
         self.admission_id = "adm_" + secrets.token_hex(6)
         self.admission_generation = 7
+        self.recorded = []          # [(method, path)] per request, mock only
+        self.scenarios = {}         # MOCK_SCENARIO marker -> script spec
+        self.notify_status = 404    # POST /v1/notify response status
+        self.notify_delay = 0.0     # notifier response delay in seconds
 
 
 class RunState:
@@ -89,6 +94,17 @@ class RunState:
         self.events_attempts = 0
         self.resolved_receipt = None
         self._config = config
+        match = re.match(r"MOCK_SCENARIO:([A-Za-z0-9_]+)",
+                         (self.payload or {}).get("input") or "")
+        spec = {}
+        if match:
+            self.scenario = match.group(1)
+            spec = dict(config.scenarios.get(self.scenario) or {})
+        else:
+            self.scenario = None
+        self.seq = list(spec.get("seq", config.default_seq))
+        self.output = spec.get("output", config.default_output)
+        self.pending_script = list(spec.get("pending_script") or [])
 
     def next_status(self):
         if self.stop_requested:
@@ -115,7 +131,10 @@ class RunState:
             body["runtime"] = self.runtime
         if status == "waiting_for_approval":
             self.waiting = True
-            if self.pending_controls is None:
+            if self.pending_script:
+                entry = self.pending_script.pop(0)
+                self.pending_controls = [dict(control) for control in entry]
+            elif self.pending_controls is None:
                 self.pending_controls = [dict(entry) for entry
                                          in self._config.pending_controls_sample]
             body["pending_controls"] = self.pending_controls
@@ -158,10 +177,19 @@ class MockHandler(BaseHTTPRequestHandler):
         config = self.server.config
         with config.lock:
             config.total_requests += 1
+            config.recorded.append((str(method), str(self.path)))
         profile, rest = split_route(self.path)
         if rest is None:
             return self._send_json(404, {"error": {"code": "not_found"}})
         token = self._bearer()
+        # The generic webhook sink is NOT a gateway route: it accepts any
+        # bearer (the engine sends its G2H_NOTIFY_TOKEN), never the profile
+        # key check below, and never answers GETs.
+        if rest.split("/") == ["v1", "notify"] and method == "POST":
+            if token is None:
+                return self._send_json(401, {"error": {"code":
+                                                       "unauthorized"}})
+            return self._notify_sink(config)
         if profile in (None, "default"):
             expected = config.default_key
         elif profile in config.profile_keys:
@@ -224,6 +252,13 @@ class MockHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     # ----- endpoints -----------------------------------------------------
+
+    def _notify_sink(self, config):
+        """Generic webhook mock for notifier tests; no control semantics."""
+        if config.notify_delay:
+            time.sleep(config.notify_delay)
+        return self._send_json(config.notify_status,
+                               {"ok": config.notify_status < 400})
 
     def _capabilities(self, config):
         if config.caps_status != 200:
@@ -288,6 +323,8 @@ class MockHandler(BaseHTTPRequestHandler):
         state = config.runs.get(run_id)
         if state is None or config.run_profiles.get(run_id) != profile:
             return self._send_json(404, {"error": {"code": "not_found"}})
+        if config.status_delay:
+            time.sleep(config.status_delay)
         return self._send_json(200, state.status_body())
 
     def _stop(self, config, profile, run_id):
@@ -435,3 +472,34 @@ class MockHermes:
     def stop(self):
         self._server.shutdown()
         self._server.server_close()
+
+
+# ----- negative-control helpers (mock only) -------------------------------
+
+# Endpoints that must never be touched by dashboard/relay under any scenario.
+# The only sanctioned writers to these endpoints are the existing stop and
+# resolve commands, called by a human.
+CONTROL_ACTION_PARTS = ("approval", "clarify", "stop", "resolve-unknown")
+SCENARIO_INPUT_PREFIX = "MOCK_SCENARIO:"
+
+
+def control_hits(config):
+    """Recorded (method, path) pairs that touched a control endpoint."""
+    with config.lock:
+        rows = list(config.recorded)
+    return [(method, path) for method, path in rows
+            if path.split("/").pop() in CONTROL_ACTION_PARTS]
+
+
+def assert_no_control_posts(config, note="mock scenario"):
+    """Raise with the exact requests if any control endpoint was touched."""
+    rows = control_hits(config)
+    if rows:
+        raise AssertionError("control endpoint touched during %s: %s"
+                             % (note, rows))
+
+
+def clear_recorder(config):
+    """Forget recorded requests up to now (scope a later negative check)."""
+    with config.lock:
+        del config.recorded[:]
