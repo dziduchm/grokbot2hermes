@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import calendar
 import hashlib
 import json
 import os
@@ -20,13 +21,18 @@ import re
 import secrets
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from email.utils import parsedate_to_datetime
+from typing import NoReturn
+
+import g2h_ui
 
 VERSION = "0.1.0"
 USER_AGENT = "g2h/%s (grokbot2hermes)" % VERSION
@@ -183,7 +189,8 @@ class Ctx:
         for line in human_lines or []:
             print(scrub(line))
 
-    def die(self, code: int, message: str, payload=None) -> None:
+    def die(self, code: int, message: str,
+            payload=None) -> NoReturn:
         message = scrub(str(message))
         doc = dict(payload or {})
         doc["error"] = message
@@ -1184,9 +1191,1294 @@ def cmd_capabilities(cfg: Config, ctx: Ctx, args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Parser and entry point.
+# Read-only observation: poller, differ, event outbox, ledger, notifier and
+# local dashboard. These paths only ever read run status from the gateway;
+# they never create, cancel, or answer anything. Local files are the only
+# state they change, and the optional notifier talks to exactly one
+# operator-configured destination. The local server answers requests; the
+# tool itself sends no requests from it.
 # ---------------------------------------------------------------------------
 
+NOTIFY_ENV_URL = "G2H_NOTIFY_URL"
+NOTIFY_ENV_CMD = "G2H_NOTIFY_CMD"
+NOTIFY_ENV_TOKEN = "G2H_NOTIFY_TOKEN"
+
+DASHBOARD_PORT_DEFAULT = 8790
+DASHBOARD_REFRESH_DEFAULT = 10.0
+DASHBOARD_REFRESH_MIN = 5.0
+DASHBOARD_POLL_DEFAULT = 15.0
+DASHBOARD_POLL_MIN = 5.0
+DASHBOARD_MAX_RUNS_DEFAULT = 50
+RELAY_INTERVAL_DEFAULT = 30.0
+RELAY_INTERVAL_MIN = 10.0
+PRUNE_DAYS_DEFAULT = 30
+POLLER_MAX_RETRIES = 2          # per status read; poller passes only
+POLLER_POLITENESS_DELAY = 0.25
+NOTIFY_TIMEOUT = 10.0
+FRESH_INTERVALS = 2             # fresh while last_ok_at <= N poll intervals
+
+CELL_CAP = 200                  # one dashboard cell
+FIELD_CAP = 2000                # one expanded field
+CONTROL_CONTEXT_CAP = 1000      # control context inside an event file
+TASK_TEXT_CAP = 200             # task text in events, ledger and snapshot
+ERROR_SNIPPET_CAP = 200         # error snippets everywhere
+DERIVED_EXPIRY_SECONDS = 300    # documented default; the live config is not
+DERIVED_EXPIRY_LABEL = ("derived: first_seen_at + 300s assumed "
+                        "(gateway config not visible)")
+
+LEDGER_NAME = "approvals.json"
+EVENTS_DIRNAME = "events"
+EVENT_REQUESTED = "approval.requested"
+EVENT_RESOLVED = "approval.resolved"
+EVENT_TERMINAL = "run.terminal"
+EVENT_GATEWAY = "gateway.unreachable"
+RESOLUTION_ANSWERED = "answered"
+RESOLUTION_EXPIRED = "expired"
+RESOLUTION_WITHDRAWN = "withdrawn"
+RESOLUTION_UNKNOWN = "resolved_unknown"
+LEDGER_OPEN_STATES = ("seen", "delivered", "notify_failed")
+GATEWAY_OK = "ok"
+GATEWAY_FAILING = "failing"
+GATEWAY_LOG_CAP = 50
+
+CSP_POLICY = "default-src 'none'; style-src 'self'"
+
+NOTIFIER_LABELS = {
+    "none": "notifier: none (local only)",
+    "url": "notifier: webhook via G2H_NOTIFY_URL",
+    "cmd": "notifier: command via --notify-cmd or G2H_NOTIFY_CMD",
+}
+
+_LIMITATIONS = (
+    "runs dispatched by other clients (desktop app, webhooks, other tools) "
+    "are not visible: g2h sees only the runs in its own receipts",
+    "interactive surface prompts and their lifecycle are not visible: hooks "
+    "would require an install",
+    "kanban worker activity is not visible: separate surfaces, not Runs API "
+    "runs",
+    "plain session-chat human gates are not relayable: only run-scoped "
+    "approvals surface pending controls",
+)
+
+_PR_LINK_RE = re.compile(
+    r"(?:https?://)?github\.com/([A-Za-z0-9_.-]+?)/([A-Za-z0-9_.-]+?)/pull/"
+    r"([0-9]+)", re.IGNORECASE)
+
+
+def _parse_iso_seconds(text):
+    try:
+        return calendar.timegm(time.strptime(str(text), "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
+
+
+def trunc_text(value, cap: int):
+    if value is None:
+        return None
+    return str(value)[:cap]
+
+
+def _field_text(value, cap: int):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        try:
+            value = json.dumps(value, sort_keys=True)
+        except (TypeError, ValueError):
+            value = repr(value)
+    return scrub(value)[:cap]
+
+
+def _control_request_id(element) -> str:
+    if isinstance(element, dict):
+        for field in ("prompt_id", "request_id"):
+            value = element.get(field)
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
+def _control_kind(element) -> str:
+    if isinstance(element, dict):
+        for field in ("control", "kind", "type"):
+            value = element.get(field)
+            if isinstance(value, str) and value:
+                return value
+    return "unspecified"
+
+
+def _control_generation(element):
+    if isinstance(element, dict):
+        return element.get("execution_generation")
+    return None
+
+
+def _generation_text(element) -> str:
+    generation = _control_generation(element)
+    if generation is None:
+        return ""
+    if isinstance(generation, bool):
+        return str(int(generation))
+    if isinstance(generation, int):
+        return str(generation)
+    if isinstance(generation, str):
+        return generation.strip()
+    try:
+        return json.dumps(generation, sort_keys=True)
+    except (TypeError, ValueError):
+        return repr(generation)
+
+
+def dedup_key(run_id, element) -> str:
+    """Control identity: sha256(run_id:prompt_id:execution_generation)."""
+    raw = "%s:%s:%s" % (run_id, _control_request_id(element),
+                        _generation_text(element))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def receipt_task_text(receipt, cap: int = TASK_TEXT_CAP):
+    try:
+        raw = base64.b64decode(str(receipt.get("body_b64") or ""),
+                               validate=True)
+        body = json.loads(raw.decode("utf-8", "replace"))
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return None
+    text = body.get("input") if isinstance(body, dict) else None
+    if not isinstance(text, str) or not text:
+        return None
+    return scrub(text)[:cap]
+
+
+def _beyond_window(first_seen_at) -> bool:
+    """Expiry is derived, never known: the pending deadline is invisible."""
+    stamp = _parse_iso_seconds(first_seen_at)
+    if stamp is None:
+        return False
+    return (time.time() - stamp) >= DERIVED_EXPIRY_SECONDS
+
+
+def _resolution_for(status_after, elapsed_beyond_window: bool) -> str:
+    """Observed-transition mapping; documented in docs/api-contracts.md."""
+    if status_after in ("cancelled", "interrupted"):
+        return RESOLUTION_WITHDRAWN
+    if status_after in ("running", "stopping", "completed"):
+        return RESOLUTION_ANSWERED
+    return RESOLUTION_EXPIRED if elapsed_beyond_window else RESOLUTION_UNKNOWN
+
+
+def _new_entry(run_id, element, kind: str, state: str, now: str) -> dict:
+    return {"run_id": run_id, "state": state, "resolution": None,
+            "request": {"run_id": run_id,
+                        "prompt_id": _control_request_id(element) or None,
+                        "execution_generation": _control_generation(element),
+                        "kind": kind},
+            "first_seen_at": now, "last_seen_at": now, "delivered_at": None,
+            "attempts": 0, "last_error": None, "source_event": None}
+
+
+def build_event_doc(kind: str, cfg: Config, receipt, receipt_name, run_id,
+                    element, dedup: str, resolution, expiry, first_seen_at,
+                    now: str) -> dict:
+    task_text = receipt_task_text(receipt) if receipt else None
+    control = None
+    if kind in (EVENT_REQUESTED, EVENT_RESOLVED):
+        if element is not None and not isinstance(element, dict):
+            element_payload = {"opaque": repr(element)}
+        else:
+            element_payload = dict(element or {})
+        try:
+            context = json.dumps(element_payload, sort_keys=True)
+        except (TypeError, ValueError):
+            context = repr(element_payload)
+        control = {"request_id": _control_request_id(element_payload) or None,
+                   "execution_generation":
+                       _control_generation(element_payload),
+                   "kind": _control_kind(element_payload),
+                   "context": scrub(context)[:CONTROL_CONTEXT_CAP],
+                   "expiry": expiry}
+    source = "GET /v1/runs/%s pending_controls" % run_id \
+        if kind in (EVENT_REQUESTED, EVENT_RESOLVED) \
+        else ("GET /v1/runs/%s" % run_id if kind == EVENT_TERMINAL
+              else "gateway contact probe (transport errors)")
+    return {
+        "version": 1,
+        "tool": "grokbot2hermes",
+        "kind": kind,
+        "profile": (receipt or {}).get("profile") or cfg.profile or "default",
+        "base_url": (receipt or {}).get("base_url") or cfg.base_url,
+        "run_id": run_id,
+        "receipt": receipt_name,
+        "task": {"text": task_text,
+                 "created_at": (receipt or {}).get("created_at")},
+        "control": control,
+        "resolution": resolution if kind == EVENT_RESOLVED else None,
+        "dedup_key": dedup,
+        "first_seen_at": first_seen_at,
+        "observed_at": now,
+        "source": source,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Outbox hygiene: 0600 files in a 0700 dir under the receipt dir.
+# ---------------------------------------------------------------------------
+
+def ledger_path(cfg: Config) -> str:
+    return os.path.join(cfg.receipt_dir, LEDGER_NAME)
+
+
+def events_path(cfg: Config) -> str:
+    return os.path.join(cfg.receipt_dir, EVENTS_DIRNAME)
+
+
+def _fresh_ledger() -> dict:
+    return {"version": 1, "entries": {}, "deliveries": {},
+            "gateway": {"state": GATEWAY_OK, "last_transition_at": None,
+                        "log": []}}
+
+
+def _atomic_private_write(ctx: Ctx, path: str, text: str) -> None:
+    if os.path.islink(path):
+        ctx.die(EXIT_CREDENTIAL, "refusing symlinked target: %s" % path)
+    target_dir = os.path.dirname(path) or "."
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=target_dir, prefix=".g2h-",
+                                        suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, path)
+        except OSError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except OSError as exc:
+        ctx.die(EXIT_INTERNAL, "cannot write %s: %s" % (path, exc))
+
+
+def ensure_events_dir(ctx: Ctx, cfg: Config) -> bool:
+    """Validate or create <receipts>/events 0700; False: no receipts root."""
+    if not os.path.isdir(cfg.receipt_dir):
+        return False
+    if os.path.islink(cfg.receipt_dir):
+        ctx.die(EXIT_CREDENTIAL, "refusing symlinked receipt dir: %s"
+                % cfg.receipt_dir)
+    mode = stat.S_IMODE(os.stat(cfg.receipt_dir).st_mode)
+    if mode & 0o077:
+        ctx.die(EXIT_CREDENTIAL, "receipt dir permissions must be 0700 "
+                "(found %s): %s" % (oct(mode), cfg.receipt_dir))
+    path = events_path(cfg)
+    if os.path.islink(path):
+        ctx.die(EXIT_CREDENTIAL, "refusing symlinked events dir: %s" % path)
+    if os.path.exists(path):
+        if not os.path.isdir(path):
+            ctx.die(EXIT_CREDENTIAL, "events dir is not a directory: %s"
+                    % path)
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        if mode & 0o077:
+            ctx.die(EXIT_CREDENTIAL, "events dir permissions must be 0700 "
+                    "(found %s): %s" % (oct(mode), path))
+        return True
+    try:
+        os.mkdir(path, 0o700)  # single level; the receipt root already exists
+    except OSError as exc:
+        ctx.die(EXIT_CREDENTIAL, "cannot create events dir: %s" % exc)
+    if stat.S_IMODE(os.stat(path).st_mode) & 0o077:
+        ctx.die(EXIT_CREDENTIAL, "umask loosened the events dir mode: %s"
+                % path)
+    return True
+
+
+def write_event_doc(ctx: Ctx, events_dir: str, doc: dict) -> str:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    base = "%s-%s" % (stamp, str(doc.get("dedup_key"))[:8])
+    name = base + ".json"
+    index = 1
+    while os.path.exists(os.path.join(events_dir, name)):
+        name = "%s-%d.json" % (base, index)
+        index += 1
+    text = scrub(scrub(json.dumps(doc, sort_keys=True, indent=2)))
+    _atomic_private_write(ctx, os.path.join(events_dir, name), text)
+    return name
+
+
+def load_ledger(ctx: Ctx, cfg: Config) -> dict:
+    path = ledger_path(cfg)
+    if not os.path.exists(path):
+        return _fresh_ledger()
+    if os.path.islink(path):
+        ctx.die(EXIT_CREDENTIAL, "refusing symlinked ledger: %s" % path)
+    try:
+        stats = os.lstat(path)
+    except OSError as exc:
+        ctx.die(EXIT_CREDENTIAL, "cannot read ledger: %s" % exc)
+    if not stat.S_ISREG(stats.st_mode):
+        ctx.die(EXIT_CREDENTIAL, "ledger is not a regular file: %s" % path)
+    mode = stat.S_IMODE(stats.st_mode)
+    if mode != 0o600:
+        ctx.die(EXIT_CREDENTIAL, "ledger permissions must be 0600 "
+                "(found %s): %s" % (oct(mode), path))
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError) as exc:
+        ctx.die(EXIT_INTERNAL, "cannot parse ledger: %s" % exc)
+    if not isinstance(doc, dict):
+        ctx.die(EXIT_INTERNAL, "ledger is not a JSON object")
+    ledger = _fresh_ledger()
+    if isinstance(doc.get("entries"), dict):
+        ledger["entries"] = dict(doc["entries"])
+    if isinstance(doc.get("deliveries"), dict):
+        ledger["deliveries"] = dict(doc["deliveries"])
+    gateway = doc.get("gateway")
+    if isinstance(gateway, dict):
+        view = ledger["gateway"]
+        if isinstance(gateway.get("state"), str):
+            view["state"] = gateway["state"]
+        if gateway.get("last_transition_at"):
+            view["last_transition_at"] = gateway["last_transition_at"]
+        if isinstance(gateway.get("log"), list):
+            view["log"] = [str(line)
+                           for line in gateway["log"][:GATEWAY_LOG_CAP]]
+    return ledger
+
+
+def write_ledger(ctx: Ctx, cfg: Config, ledger: dict) -> None:
+    text = scrub(scrub(json.dumps(ledger, sort_keys=True, indent=2)))
+    _atomic_private_write(ctx, ledger_path(cfg), text)
+
+
+def scan_receipt_files(ctx: Ctx, cfg: Config) -> list:
+    """Receipt (path, doc) pairs, newest first. Tolerates single bad files."""
+    found = []
+    for name in sorted(os.listdir(cfg.receipt_dir)):
+        if not name.endswith(".json") or name == LEDGER_NAME:
+            continue  # approvals.json is ledger state, not a receipt
+        path = os.path.join(cfg.receipt_dir, name)
+        if os.path.islink(path):
+            ctx.diagnostic("receipt_skipped",
+                           "%s: symlinked receipt rejected" % name)
+            continue
+        if not os.path.isfile(path):
+            continue  # the events/ subdirectory and anything non-json
+        try:
+            doc, _raw_body = load_receipt(ctx, path)
+        except G2hExit as exc:
+            ctx.diagnostic("receipt_skipped", "%s: %s"
+                           % (name, str(exc)[:ERROR_SNIPPET_CAP]))
+            continue
+        found.append((path, doc))
+    found.sort(key=lambda pair: str((pair[1] or {}).get("created_at") or ""),
+               reverse=True)
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Differ: consecutive observations become events; only the poller looks.
+# ---------------------------------------------------------------------------
+
+def _element_from_request(request: dict) -> dict:
+    """Rebuild a minimal pending-controls element from a ledger request.
+
+    The ledger stores only identity fields (run_id, prompt_id,
+    execution_generation, kind); this maps them back onto the element keys
+    the mock and the gateway use so older events stay inspectable.
+    """
+    element = {}
+    if request.get("prompt_id"):
+        element["prompt_id"] = request["prompt_id"]
+    if isinstance(request.get("execution_generation"), int):
+        element["execution_generation"] = request["execution_generation"]
+    if request.get("kind"):
+        element["control"] = request["kind"]
+    return element
+
+
+def diff_receipt(cfg: Config, receipt: dict, receipt_name: str, run_id: str,
+                 status_doc: dict, ledger: dict) -> dict:
+    old_status = receipt.get("status") \
+        if isinstance(receipt.get("status"), str) else None
+    new_status = status_doc.get("status")
+    old_pending = receipt.get("pending_controls")
+    old_pending = old_pending if isinstance(old_pending, list) else []
+    new_pending = status_doc.get("pending_controls")
+    new_pending = new_pending if isinstance(new_pending, list) else []
+    old_map = {dedup_key(run_id, element): element
+               for element in old_pending if isinstance(element, dict)}
+    new_map = {dedup_key(run_id, element): element
+               for element in new_pending if isinstance(element, dict)}
+    now = utc_now()
+    docs = []
+    entries = ledger.setdefault("entries", {})
+    # The ledger is the source of truth for what was already reported; the
+    # receipt copy of pending_controls is stale by the time a pass runs.
+    for entry_key, entry in list(entries.items()):
+        if not isinstance(entry, dict) or entry.get("run_id") != run_id:
+            continue
+        if entry.get("state") not in LEDGER_OPEN_STATES:
+            continue  # already requested; do not re-emit on resume
+        if entry_key in new_map:
+            continue  # still observed in this pass
+        element = old_map.get(entry_key) or _element_from_request(
+            entry.get("request") or {})
+        beyond = _beyond_window(entry.get("first_seen_at"))
+        resolution = _resolution_for(new_status, beyond)
+        expiry = DERIVED_EXPIRY_LABEL \
+            if resolution == RESOLUTION_EXPIRED else None
+        docs.append(build_event_doc(
+            EVENT_RESOLVED, cfg, receipt, receipt_name, run_id, element,
+            entry_key, resolution, expiry, entry.get("first_seen_at"), now))
+        entry["state"] = "resolved"
+        entry["resolution"] = resolution
+        entry["last_seen_at"] = now
+        entries[entry_key] = entry
+    for key, element in new_map.items():
+        entry = entries.get(key)
+        if entry is not None and entry.get("state") in LEDGER_OPEN_STATES:
+            continue  # already requested; do not re-emit on resume
+        if entry is None:
+            entry = _new_entry(run_id, element, _control_kind(element),
+                               "seen", now)
+        if not entry.get("first_seen_at"):
+            entry["first_seen_at"] = now
+        entry["last_seen_at"] = now
+        entries[key] = entry
+        docs.append(build_event_doc(
+            EVENT_REQUESTED, cfg, receipt, receipt_name, run_id, element,
+            key, None, DERIVED_EXPIRY_LABEL, entry.get("first_seen_at"), now))
+    if new_status in TERMINAL_STATUSES \
+            and old_status not in TERMINAL_STATUSES:
+        key = hashlib.sha256(("run.terminal:%s" % run_id)
+                             .encode("utf-8")).hexdigest()
+        entry = entries.get(key)
+        if not (isinstance(entry, dict) and entry.get("state") == "resolved"):
+            if entry is None:
+                entry = _new_entry(run_id, None, EVENT_TERMINAL, "resolved",
+                                   now)
+            entry["state"] = "resolved"
+            entry["last_seen_at"] = now
+            entries[key] = entry
+            docs.append(build_event_doc(
+                EVENT_TERMINAL, cfg, receipt, receipt_name, run_id, None,
+                key, None, None, entry.get("first_seen_at"), now))
+    return {"events": docs, "status_changed": old_status != new_status}
+
+
+def persist_events(ctx: Ctx, cfg: Config, ledger: dict, docs: list) -> list:
+    names = []
+    deliveries = ledger.setdefault("deliveries", {})
+    entries = ledger.setdefault("entries", {})
+    for doc in docs:
+        name = write_event_doc(ctx, events_path(cfg), doc)
+        names.append(name)
+        deliveries[name] = {"attempts": 0, "delivered_at": None,
+                            "last_error": None, "kind": doc["kind"],
+                            "dedup_key": doc["dedup_key"]}
+        entry = entries.get(doc["dedup_key"])
+        if isinstance(entry, dict) and not entry.get("source_event"):
+            entry["source_event"] = name
+    ledger["_dirty"] = True
+    return names
+
+
+# ---------------------------------------------------------------------------
+# Poller: one shared pass for dashboard and relay.
+# ---------------------------------------------------------------------------
+
+def _status_snippet(status_doc: dict) -> str:
+    status = str(status_doc.get("status") or "")
+    output = status_doc.get("output")
+    if isinstance(output, str) and output:
+        return scrub("%s: %s" % (status, output))[:CELL_CAP]
+    return status
+
+
+def _current_work(receipt: dict):
+    event = receipt.get("last_event")
+    if isinstance(event, dict) and event.get("snippet"):
+        return _field_text(event.get("snippet"), CELL_CAP)
+    return _field_text(receipt.get("last_output"), CELL_CAP)
+
+
+def _row_base(receipt: dict, name: str, cfg: Config) -> dict:
+    run_id = receipt.get("run_id")
+    status = receipt.get("status")
+    last_error = receipt.get("last_error")
+    open_controls = []
+    for element in receipt.get("pending_controls") or []:
+        if element is None:
+            continue
+        open_controls.append(dict(element) if isinstance(element, dict)
+                             else {"opaque": repr(element)})
+    return {
+        "receipt": name,
+        "run_id": run_id if isinstance(run_id, str) else None,
+        "profile": receipt.get("profile") or cfg.profile or "default",
+        "status": status if isinstance(status, str) else None,
+        "task": receipt_task_text(receipt),
+        "task_created_at": receipt.get("created_at"),
+        "created_at": receipt.get("created_at"),
+        "updated_at": receipt.get("updated_at"),
+        "last_ok_at": receipt.get("last_ok_at"),
+        "last_error": scrub(str(last_error))[:ERROR_SNIPPET_CAP]
+        if last_error else None,
+        "last_event": dict(receipt["last_event"])
+        if isinstance(receipt.get("last_event"), dict) else None,
+        "current_work": _current_work(receipt),
+        "output": _field_text(receipt.get("last_output"), FIELD_CAP),
+        "usage": receipt.get("usage")
+        if isinstance(receipt.get("usage"), dict) else None,
+        "idem_present": bool(receipt.get("idempotency_key")),
+        "open_controls": open_controls,
+    }
+
+
+def _poll_read_failed(ctx: Ctx, path: str, receipt: dict, message: str) -> None:
+    """Keep the previous observed data; record the read error (runs stale)."""
+    receipt["last_error"] = scrub(str(message))[:ERROR_SNIPPET_CAP]
+    receipt["updated_at"] = utc_now()
+    write_receipt(ctx, path, receipt)
+
+
+def poll_pass(cfg: Config, ctx: Ctx, key: str, max_runs: int) -> dict:
+    """One observation pass: GET run status only; local files are the only
+    writes. Used by dashboard, relay and their serve/watch loops."""
+    contacts = 0
+    failures = 0
+    total = 0
+    selected = []
+    if os.path.isdir(cfg.receipt_dir):
+        ensure_events_dir(ctx, cfg)
+        ledger = load_ledger(ctx, cfg)
+        found = scan_receipt_files(ctx, cfg)
+        total = len(found)
+        selected = found[:max(0, int(max_runs))]
+    else:
+        ledger = _fresh_ledger()
+    rows = []
+    docs = []
+    names = []
+    for path, receipt in selected:
+        name = os.path.basename(path)
+        run_id = receipt.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            rows.append(_row_base(receipt, name, cfg))
+            continue
+        status = receipt.get("status")
+        if isinstance(status, str) and status in TERMINAL_STATUSES:
+            rows.append(_row_base(receipt, name, cfg))
+            continue
+        if contacts + failures:
+            time.sleep(POLLER_POLITENESS_DELAY)
+        try:
+            status_doc = get_run(cfg, ctx, key, run_id, POLLER_MAX_RETRIES)
+        except G2hExit as exc:
+            if exc.code == EXIT_AUTH:
+                raise  # a bad key must stop everything loudly
+            failures += 1
+            _poll_read_failed(ctx, path, receipt, str(exc))
+            rows.append(_row_base(receipt, name, cfg))
+            continue
+        except TransportError as exc:
+            failures += 1
+            _poll_read_failed(ctx, path, receipt, str(exc))
+            rows.append(_row_base(receipt, name, cfg))
+            continue
+        contacts += 1
+        diff = diff_receipt(cfg, receipt, name, run_id, status_doc, ledger)
+        docs.extend(diff["events"])
+        update_receipt_from_status(receipt, status_doc)
+        if status_doc.get("pending_controls") is None:
+            receipt["pending_controls"] = None
+        now = utc_now()
+        receipt["last_ok_at"] = now
+        receipt["last_error"] = None
+        if diff["events"]:
+            receipt["last_event"] = {"name": diff["events"][-1]["kind"],
+                                     "at": now,
+                                     "snippet": _status_snippet(status_doc)}
+        elif diff["status_changed"]:
+            receipt["last_event"] = {"name": "status", "at": now,
+                                     "snippet": _status_snippet(status_doc)}
+        write_receipt(ctx, path, receipt)
+        rows.append(_row_base(receipt, name, cfg))
+    if docs:
+        names.extend(persist_events(ctx, cfg, ledger, docs))
+    gateway = ledger.setdefault("gateway", _fresh_ledger()["gateway"])
+    ledger_dirty = bool(ledger.pop("_dirty", False))
+    if contacts + failures:
+        current = GATEWAY_FAILING if failures else GATEWAY_OK
+        previous = gateway.get("state") or GATEWAY_OK
+        gateway["log"] = [str(line)
+                          for line in (gateway.get("log")
+                                       or [])][-GATEWAY_LOG_CAP:]
+        if current != previous:
+            now = utc_now()
+            gateway["state"] = current
+            gateway["last_transition_at"] = now
+            gateway["log"].append("unreachable at %s" % now
+                                  if current == GATEWAY_FAILING
+                                  else "recovered at %s" % now)
+            ledger_dirty = True
+            if current == GATEWAY_FAILING:
+                dedup = hashlib.sha256(("gateway-unreachable:%s:%s"
+                                        % (cfg.base_url, now))
+                                       .encode("utf-8")).hexdigest()
+                gateway_docs = [build_event_doc(
+                    EVENT_GATEWAY, cfg, None, None, None, None, dedup, None,
+                    None, None, now)]
+                names.extend(persist_events(ctx, cfg, ledger, gateway_docs))
+                docs.extend(gateway_docs)
+    if ledger_dirty:
+        write_ledger(ctx, cfg, ledger)
+    return {"rows": rows, "events": docs, "event_names": names,
+            "contacts": contacts, "failures": failures,
+            "attempted": contacts + failures, "ledger": ledger,
+            "receipts_total": total}
+
+
+# ---------------------------------------------------------------------------
+# Snapshot: freshness labels, blockers, decisions, PR links.
+# ---------------------------------------------------------------------------
+
+def find_pr_link(texts):
+    for source, text in texts:
+        if not isinstance(text, str) or not text:
+            continue
+        match = _PR_LINK_RE.search(text)
+        if match:
+            owner, repo, number = match.groups()
+            return {"url": "https://github.com/%s/%s/pull/%s"
+                    % (owner, repo, number),
+                    "number": number, "derived_from": source}
+    return None
+
+
+def _freshness_label(row: dict, failures: int,
+                     freshness_interval: float) -> tuple:
+    status = row.get("status")
+    if row.get("run_id") is None:
+        return ("unknown (no run id yet; dispatch may have failed pre-create;"
+                " see receipt)", True)
+    if status in TERMINAL_STATUSES:
+        return ("fresh (terminal; shown from receipt)", False)
+    if status == "unknown":
+        return ("unknown (gateway reports status unknown)", True)
+    if failures:
+        return ("stale (gateway unreachable)", True)
+    last_ok = _parse_iso_seconds(row.get("last_ok_at"))
+    if last_ok is None:
+        return ("unknown (no successful status read yet)", True)
+    age = max(0.0, time.time() - last_ok)
+    window = FRESH_INTERVALS * max(0.0, freshness_interval)
+    if age <= window:
+        return ("fresh (last confirmed update %d seconds ago; within the "
+                "%d second window)" % (int(age), int(window)), False)
+    return ("stale (last confirmed update %d seconds ago; beyond the %d "
+            "second window)" % (int(age), int(window)), True)
+
+
+def _open_decisions(row: dict, entries: dict) -> list:
+    run_id = row.get("run_id")
+    decisions = []
+    for element in row.get("open_controls") or []:
+        key = dedup_key(run_id, element)
+        entry = entries.get(key) or {}
+        decisions.append({
+            "kind": _control_kind(element),
+            "request_id": _control_request_id(element) or None,
+            "execution_generation": _control_generation(element),
+            "expiry": DERIVED_EXPIRY_LABEL if entry.get("first_seen_at")
+            else "unknown",
+            "dedup_key": key,
+            "note": "answer in your Hermes client; this dashboard cannot "
+                    "answer",
+        })
+    return decisions
+
+
+def _blockers(row: dict, stale_flag: bool, entries: dict) -> list:
+    out = []
+    status = row.get("status")
+    if status == "waiting_for_approval":
+        out.append("waiting for approval")
+    if status == "stopping":
+        out.append("stopping")
+    if status == "failed":
+        detail = row.get("last_error") or row.get("output") or ""
+        out.append("failed" + (": " + detail[:CELL_CAP] if detail else ""))
+    if stale_flag:
+        out.append("transport stale")
+    for entry in entries.values():
+        request = (entry or {}).get("request") or {}
+        if request.get("run_id") != row.get("run_id"):
+            continue
+        if (entry or {}).get("state") == "notify_failed":
+            message = (entry or {}).get("last_error") or ""
+            out.append("notify_failed" +
+                       (": " + scrub(str(message))[:100] if message else ""))
+    return out
+
+
+def build_snapshot(cfg: Config, rows: list, ledger: dict, dest_kind: str,
+                   contacts: int, failures: int, attempted: int,
+                   freshness_interval: float, receipts_total: int,
+                   max_runs: int) -> dict:
+    entries = ledger.get("entries") or {}
+    runs = []
+    for row in rows:
+        label, stale_flag = _freshness_label(row, failures,
+                                             freshness_interval)
+        decisions = _open_decisions(row, entries)
+        blockers = _blockers(row, stale_flag, entries)
+        pr_link = find_pr_link([("input", row.get("task")),
+                                ("final output", row.get("output"))])
+        finalized = dict(row)
+        finalized["freshness"] = {"label": label, "stale": stale_flag}
+        finalized["blockers"] = blockers
+        finalized["decisions"] = decisions
+        finalized["pr_link"] = pr_link
+        finalized["open_controls"] = len(decisions)
+        runs.append(finalized)
+    gateway = ledger.get("gateway") or {}
+    return {
+        "version": 1,
+        "tool": "grokbot2hermes",
+        "generated_at": utc_now(),
+        "profile": cfg.profile or "default",
+        "base_url": cfg.base_url,
+        "gateway": {"state": gateway.get("state") or GATEWAY_OK,
+                    "last_transition_at": gateway.get("last_transition_at"),
+                    "contacts": contacts, "failures": failures,
+                    "attempted": attempted},
+        "notifier": NOTIFIER_LABELS.get(dest_kind, NOTIFIER_LABELS["none"]),
+        "counts": {"shown": len(runs),
+                   "hidden": max(0, receipts_total - len(runs)),
+                   "total_receipts": receipts_total,
+                   "open_decisions": sum(len(r["decisions"]) for r in runs)},
+        "freshness_window_seconds": FRESH_INTERVALS
+        * max(0.0, freshness_interval),
+        "limitations": list(_LIMITATIONS),
+        "runs": runs,
+    }
+
+
+def _empty_snapshot(cfg: Config, dest_kind: str, max_runs: int) -> dict:
+    return build_snapshot(cfg, [], _fresh_ledger(), dest_kind, 0, 0, 0,
+                          DASHBOARD_POLL_DEFAULT, 0, max_runs)
+
+
+# ---------------------------------------------------------------------------
+# (Renderer and local server live in g2h_ui.py: pure presentation layer,
+# split out per the single-file size rule.)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Local server: loopback only, GET-only answers, strict headers.
+# ---------------------------------------------------------------------------
+
+def _serve_poll_loop(cfg: Config, ctx: Ctx, key: str, args, dest_kind: str,
+                     holder: dict, stop: threading.Event) -> None:
+    while not stop.is_set():
+        try:
+            outcome = poll_pass(cfg, ctx, key, max_runs=args.max_runs)
+            snapshot = build_snapshot(
+                cfg, outcome["rows"], outcome["ledger"], dest_kind,
+                outcome["contacts"], outcome["failures"],
+                outcome["attempted"], args.poll_interval,
+                outcome["receipts_total"], args.max_runs)
+            with holder["lock"]:
+                holder["snapshot"] = snapshot
+                holder["error"] = None
+        except G2hExit as exc:
+            with holder["lock"]:
+                holder["error"] = scrub(str(exc))
+            if exc.code == EXIT_AUTH:
+                break  # a bad key stops the poller; the page stays honest
+        except Exception as exc:  # never let the poller thread die silently
+            with holder["lock"]:
+                holder["error"] = scrub("%s: %s" % (type(exc).__name__, exc))
+        if stop.wait(args.poll_interval):
+            break
+
+
+def _serve_dashboard(cfg: Config, ctx: Ctx, key: str, args) -> int:
+    port = _dashboard_port(ctx, args)
+    dest_kind, _value = resolve_notifier_destination(ctx, args)
+    lock = threading.Lock()
+    holder = {"snapshot": None, "error": None, "lock": lock}
+    try:
+        outcome = poll_pass(cfg, ctx, key, max_runs=args.max_runs)
+        snapshot = build_snapshot(
+            cfg, outcome["rows"], outcome["ledger"], dest_kind,
+            outcome["contacts"], outcome["failures"], outcome["attempted"],
+            args.poll_interval, outcome["receipts_total"], args.max_runs)
+        with lock:
+            holder["snapshot"] = snapshot
+    except G2hExit as exc:
+        if exc.code in (EXIT_AUTH, EXIT_CREDENTIAL):
+            raise
+        with lock:
+            holder["error"] = scrub(str(exc))
+    stop = threading.Event()
+    thread = threading.Thread(target=_serve_poll_loop, name="g2h-poller",
+                              args=(cfg, ctx, key, args, dest_kind, holder,
+                                    stop), daemon=True)
+    thread.start()
+
+    def page_fn(query: dict) -> bytes:
+        refresh = args.refresh or 0.0
+        if "refresh" in query and query["refresh"]:
+            raw = query["refresh"][0].strip()
+            try:
+                value = float(raw)
+            except ValueError:
+                value = refresh
+            if raw in ("0", "0.0"):
+                refresh = 0.0
+            else:
+                refresh = max(DASHBOARD_REFRESH_MIN, value)
+        with holder["lock"]:
+            snapshot = holder["snapshot"]
+            error = holder["error"]
+        if snapshot is None:
+            snapshot = _empty_snapshot(cfg, dest_kind, args.max_runs)
+        page = g2h_ui.render_html(snapshot, error=error, refresh=refresh)
+        return page.encode("utf-8")
+
+    allowed_hosts = frozenset({"127.0.0.1:%d" % port,
+                               "localhost:%d" % port})
+    ctx.warn("serving the dashboard on http://127.0.0.1:%d/ (Ctrl+C stops;"
+             " refresh %.0fs, poll interval %.0fs)"
+             % (port, args.refresh or 0.0, args.poll_interval))
+    try:
+        g2h_ui.serve_dashboard(port, VERSION, allowed_hosts, page_fn)
+    finally:
+        stop.set()
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Notifier: exactly one operator-configured destination; one attempt per
+# event per invocation; a human does any retry with --redeliver.
+# ---------------------------------------------------------------------------
+
+def resolve_notifier_destination(ctx: Ctx, args) -> tuple:
+    sources = []
+    if getattr(args, "notify_url", None):
+        sources.append(("url", args.notify_url.strip(), "--notify-url"))
+    if getattr(args, "notify_cmd", None):
+        sources.append(("cmd", args.notify_cmd, "--notify-cmd"))
+    env_url = os.environ.get(NOTIFY_ENV_URL)
+    if env_url and env_url.strip() and not args.notify_url:
+        sources.append(("url", env_url.strip(), NOTIFY_ENV_URL))
+    env_cmd = os.environ.get(NOTIFY_ENV_CMD)
+    if env_cmd and env_cmd.strip() and not args.notify_cmd:
+        sources.append(("cmd", env_cmd.strip(), NOTIFY_ENV_CMD))
+    kinds = {source[0] for source in sources}
+    if len(kinds) > 1:
+        ctx.die(EXIT_USAGE,
+                "conflicting notifier destinations: %s; configure exactly "
+                "one" % ", ".join(source[2] for source in sources))
+    if not sources:
+        return "none", None
+    kind, value, where = sources[0]
+    if kind == "url":
+        parts = urllib.parse.urlparse(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            ctx.die(EXIT_USAGE, "invalid --notify-url URL: %r" % value)
+        token = os.environ.get(NOTIFY_ENV_TOKEN) or ""
+        if not token.strip():
+            ctx.die(EXIT_CREDENTIAL,
+                    "%s needs a bearer token: set %s (the token is never "
+                    "printed and never travels on argv)" % (where,
+                                                            NOTIFY_ENV_TOKEN))
+        scrub_register(token.strip())
+        token_env_value = token.strip()
+        scrub_register(token_env_value)
+        return "url", value
+    return "cmd", value
+
+
+def notify_send(ctx: Ctx, dest: tuple, event_text: str) -> tuple:
+    kind, value = dest
+    try:
+        if kind == "cmd":
+            proc = subprocess.run([value], input=event_text.encode("utf-8"),
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE,
+                                  timeout=NOTIFY_TIMEOUT)
+            if proc.returncode == 0:
+                return True, ""
+            detail = proc.stderr.decode("utf-8", "replace").strip()
+            if not detail:
+                detail = proc.stdout.decode("utf-8", "replace").strip()
+            return False, "exit %s: %s" % (proc.returncode,
+                                           scrub(detail[:150]))
+        headers = {"Content-Type": "application/json",
+                   "User-Agent": USER_AGENT}
+        token = (os.environ.get(NOTIFY_ENV_TOKEN) or "").strip()
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        request = urllib.request.Request(value,
+                                         data=event_text.encode("utf-8"),
+                                         headers=headers)
+        response = _OPENER.open(request, timeout=NOTIFY_TIMEOUT)
+        with response:
+            status = response.status
+            body = response.read(CELL_CAP + 1).decode("utf-8", "replace")
+        if 200 <= status < 300:
+            return True, ""
+        return False, "http %s: %s" % (status, scrub(body.strip()[:150]))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read(CELL_CAP + 1).decode("utf-8", "replace")
+        except OSError:
+            body = ""
+        return False, "http %s: %s" % (exc.code, scrub(body.strip()[:150]))
+    except (urllib.error.URLError, OSError) as exc:
+        # URLError covers DNS/refused; OSError covers socket.timeout in 3.9
+        return False, "connection error: %s" % scrub(str(exc)[:150])
+    except subprocess.TimeoutExpired:
+        return False, "timed out after %ds" % int(NOTIFY_TIMEOUT)
+
+
+def deliver_pass(ctx: Ctx, cfg: Config, dest: tuple, ledger: dict,
+                 only_key=None) -> tuple:
+    """One attempt per undelivered event; no automatic retry loops."""
+    delivered = 0
+    failed = 0
+    lines = []
+    deliveries = ledger.setdefault("deliveries", {})
+    entries = ledger.setdefault("entries", {})
+    outdir = events_path(cfg)
+    for name in sorted(deliveries):
+        info = deliveries[name]
+        if only_key is not None:
+            if info.get("dedup_key") != only_key:
+                continue
+        else:
+            if info.get("delivered_at"):
+                continue
+            if info.get("attempts"):
+                continue  # a failed attempt waits for --redeliver
+        path = os.path.join(outdir, name)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                event_text = handle.read()
+        except OSError:
+            continue  # pruned or missing: nothing to send
+        key_short = str(info.get("dedup_key"))[:8]
+        kind_label = str(info.get("kind"))
+        delivered_at = utc_now()
+        ok, err = notify_send(ctx, dest, event_text)
+        info["attempts"] = int(info.get("attempts") or 0) + 1
+        entry = entries.get(info.get("dedup_key"))
+        if ok:
+            info["delivered_at"] = delivered_at
+            info["last_error"] = None
+            delivered += 1
+            lines.append("delivered via %s: %s (%s)"
+                         % (dest[0], key_short, kind_label))
+        else:
+            info["last_error"] = scrub(str(err))[:CELL_CAP]
+            failed += 1
+            lines.append("notify_failed via %s: %s (%s): %s"
+                         % (dest[0], key_short, kind_label,
+                            info["last_error"]))
+        if isinstance(entry, dict):
+            entry["attempts"] = int(entry.get("attempts") or 0) + 1
+            entry["last_error"] = None if ok else info["last_error"]
+            if ok:
+                entry["delivered_at"] = delivered_at
+                if entry.get("state") in LEDGER_OPEN_STATES:
+                    entry["state"] = "delivered"
+            elif entry.get("state") in ("seen", "delivered"):
+                entry["state"] = "notify_failed"
+    if delivered or failed:
+        ledger["_dirty"] = True
+    return delivered, failed, lines
+
+
+def redeliver_once(ctx: Ctx, cfg: Config, dest: tuple, ledger: dict,
+                   key_prefix: str) -> dict:
+    """Human-typed single reattempt; ambiguous or unknown keys are usage."""
+    entries = ledger.setdefault("entries", {})
+    deliveries = ledger.setdefault("deliveries", {})
+    keys = {key for key in entries if str(key).startswith(key_prefix)}
+    keys |= {str(info.get("dedup_key")) for info in deliveries.values()
+             if str(info.get("dedup_key") or "").startswith(key_prefix)}
+    if not keys:
+        ctx.die(EXIT_USAGE, "--redeliver: no ledger entry matches %r"
+                % key_prefix)
+    if len(keys) > 1:
+        ctx.die(EXIT_USAGE, "--redeliver: %d matches for %r; give a longer "
+                "prefix" % (len(keys), key_prefix))
+    only = keys.pop()
+    delivered, failed, lines = deliver_pass(ctx, cfg, dest, ledger,
+                                            only_key=only)
+    return {"key": only, "delivered": delivered, "failed": failed,
+            "lines": lines}
+
+
+def prune_pass(ctx: Ctx, cfg: Config, ledger: dict, days: int) -> tuple:
+    """Drop resolved entries and their files older than N days; no receipts."""
+    if days < 0:
+        return (0, 0)
+    cutoff = time.time() - days * 86400
+    outdir = events_path(cfg)
+    try:
+        dir_entries = os.scandir(outdir)
+    except OSError:
+        return (0, 0)
+    file_names = [entry.name for entry in dir_entries
+                  if entry.name.endswith(".json")]
+    dir_entries.close()
+    deliveries = ledger.get("deliveries") or {}
+    entries = ledger.get("entries") or {}
+
+    def stamp_age(name):
+        stamp = name[:16]
+        file_ts = _parse_stamp_seconds(stamp)
+        if file_ts is None:
+            return None
+        return cutoff - file_ts
+
+    old_resolved = []
+    for key, entry in entries.items():
+        if not isinstance(entry, dict) or entry.get("state") != "resolved":
+            continue
+        stamp = _parse_iso_seconds(entry.get("last_seen_at")) \
+            or _parse_iso_seconds(entry.get("first_seen_at"))
+        if stamp is not None and stamp <= cutoff:
+            old_resolved.append(key)
+    pruned_files = 0
+    pruned_entries = 0
+    dropped = set()
+
+    def drop_file(name):
+        if name in dropped:
+            return False  # already unlinked in this pass; not an error
+        full = os.path.join(outdir, name)
+        if not os.path.exists(full):
+            ctx.diagnostic("prune_skipped",
+                           "event file already absent: %s" % name)
+            return False
+        if os.path.islink(full):
+            ctx.diagnostic("prune_skipped",
+                           "symlinked event file left in place: %s" % name)
+            return False
+        try:
+            os.unlink(full)
+        except OSError as exc:
+            ctx.diagnostic("prune_skipped", "%s: %s" % (name, str(exc)))
+            return False
+        dropped.add(name)
+        return True
+
+    for key in old_resolved:
+        for name in list(deliveries):
+            info = deliveries.get(name) or {}
+            if info.get("dedup_key") == key and stamp_age(name) is not None:
+                if drop_file(name):
+                    pruned_files += 1
+                deliveries.pop(name, None)
+        entry = entries.pop(key, None)
+        still = (entry or {}).get("source_event")
+        if still and stamp_age(still) is not None:
+            if drop_file(still):
+                pruned_files += 1
+        pruned_entries += 1
+    for name in file_names:
+        if name in deliveries:
+            continue  # its owner decides removal above
+        age = stamp_age(name)
+        if age is None or age < 0:
+            continue
+        dedup = (deliveries.get(name) or {}).get("dedup_key")
+        if dedup and dedup in entries:
+            continue  # entry not resolved: keep the file
+        if not dedup and any(
+                (entry or {}).get("source_event") == name
+                for entry in entries.values()):
+            continue
+        if drop_file(name):
+            pruned_files += 1
+            deliveries.pop(name, None)
+    if pruned_files or pruned_entries:
+        ledger["_dirty"] = True
+        ledger["deliveries"] = deliveries
+        ledger["entries"] = entries
+    return (pruned_files, pruned_entries)
+
+
+def _parse_stamp_seconds(stamp: str):
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y%m%dT%H%M%SZ"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _transport_dead(outcome: dict) -> bool:
+    return bool(outcome["attempted"]) and not outcome["contacts"]
+
+
+def _dashboard_port(ctx: Ctx, args) -> int:
+    raw = args.port
+    if raw is None:
+        raw = os.environ.get("G2H_DASHBOARD_PORT") or DASHBOARD_PORT_DEFAULT
+    try:
+        port = int(str(raw))
+    except (TypeError, ValueError):
+        ctx.die(EXIT_USAGE, "invalid dashboard port: %r" % (raw,))
+    if not 1 <= port <= 65535:
+        ctx.die(EXIT_USAGE, "dashboard port out of range: %d" % port)
+    return port
+
+
+def _validate_dashboard_flags(ctx: Ctx, args) -> None:
+    if args.serve and args.out:
+        ctx.die(EXIT_USAGE, "choose either --serve or --out, not both")
+    if args.serve and args.json:
+        ctx.die(EXIT_USAGE, "--json is not supported in serve mode")
+    if args.bind not in ("127.0.0.1", "localhost"):
+        ctx.die(EXIT_USAGE, "--bind accepts only 127.0.0.1 or localhost "
+                "(loopback only)")
+    if args.refresh and args.refresh != 0 \
+            and args.refresh < DASHBOARD_REFRESH_MIN:
+        ctx.die(EXIT_USAGE, "--refresh must be 0 or at least %s seconds"
+                % DASHBOARD_REFRESH_MIN)
+    if args.poll_interval < DASHBOARD_POLL_MIN:
+        ctx.die(EXIT_USAGE, "--poll-interval must be at least %s seconds"
+                % DASHBOARD_POLL_MIN)
+    if args.max_runs < 1:
+        ctx.die(EXIT_USAGE, "--max-runs must be at least 1")
+
+
+def _validate_relay_flags(ctx: Ctx, args) -> None:
+    if args.watch and args.once:
+        ctx.die(EXIT_USAGE, "choose either --once or --watch, not both")
+    if args.interval < RELAY_INTERVAL_MIN:
+        ctx.die(EXIT_USAGE, "--interval must be at least %s seconds"
+                % RELAY_INTERVAL_MIN)
+    if args.prune_days < 0:
+        ctx.die(EXIT_USAGE, "--prune-days cannot be negative")
+    if args.max_runs < 1:
+        ctx.die(EXIT_USAGE, "--max-runs must be at least 1")
+
+
+def cmd_dashboard(cfg: Config, ctx: Ctx, args) -> int:
+    key = resolve_key(ctx, args)
+    _validate_dashboard_flags(ctx, args)
+    if args.serve:
+        return _serve_dashboard(cfg, ctx, key, args)
+    dest_kind, _value = resolve_notifier_destination(ctx, args)
+    outcome = poll_pass(cfg, ctx, key, max_runs=args.max_runs)
+    snapshot = build_snapshot(
+        cfg, outcome["rows"], outcome["ledger"], dest_kind,
+        outcome["contacts"], outcome["failures"], outcome["attempted"],
+        args.poll_interval, outcome["receipts_total"], args.max_runs)
+    code = EXIT_TRANSPORT if _transport_dead(outcome) else EXIT_OK
+    if args.out:
+        text = json.dumps(snapshot, sort_keys=True, indent=2) \
+            if args.json else g2h_ui.render_html(snapshot, refresh=args.refresh)
+        parent = os.path.dirname(os.path.abspath(args.out))
+        if not os.path.isdir(parent):
+            ctx.die(EXIT_USAGE, "cannot write --out: directory does not "
+                    "exist: %s" % parent)
+        _atomic_private_write(ctx, args.out, scrub(scrub(text)))
+        ctx.finish({"out": os.path.abspath(args.out),
+                    "counts": snapshot["counts"]},
+                   ["wrote: %s" % os.path.abspath(args.out)])
+    elif args.json:
+        ctx.emit({"snapshot": snapshot})
+    else:
+        text = g2h_ui.render_html(snapshot, refresh=args.refresh)
+        print(scrub(scrub(text)))
+    return code
+
+
+def cmd_relay(cfg: Config, ctx: Ctx, args) -> int:
+    key = resolve_key(ctx, args)
+    _validate_relay_flags(ctx, args)
+    dest_kind, dest_value = resolve_notifier_destination(ctx, args)
+    if args.redeliver and dest_kind == "none":
+        ctx.die(EXIT_USAGE, "--redeliver requires a notifier destination "
+                "(--notify-url or --notify-cmd)")
+    while True:
+        outcome = poll_pass(cfg, ctx, key, max_runs=args.max_runs)
+        ledger = outcome["ledger"]
+        delivered = failed = 0
+        delivery_lines = []
+        if dest_kind != "none":
+            delivered, failed, delivery_lines = deliver_pass(
+                ctx, cfg, (dest_kind, dest_value), ledger)
+        redelivery = None
+        if args.redeliver:
+            redelivery = redeliver_once(ctx, cfg, (dest_kind, dest_value),
+                                        ledger, args.redeliver)
+        pruned_files = pruned_entries = 0
+        if args.prune_days:
+            pruned_files, pruned_entries = prune_pass(ctx, cfg, ledger,
+                                                      args.prune_days)
+        if ledger.pop("_dirty", False):
+            write_ledger(ctx, cfg, ledger)
+        gateway_state = (ledger.get("gateway") or {}).get("state") \
+            or GATEWAY_OK
+        payload = {
+            "events": [{"kind": doc["kind"],
+                        "dedup_key": doc["dedup_key"],
+                        "file": name,
+                        "receipt": doc.get("receipt"),
+                        "run_id": doc.get("run_id"),
+                        "resolution": doc.get("resolution")}
+                       for doc, name in zip(outcome["events"],
+                                            outcome["event_names"])],
+            "delivered": delivered,
+            "notify_failed": failed,
+            "notifier": NOTIFIER_LABELS[dest_kind],
+            "gateway": gateway_state,
+            "contacts": outcome["contacts"],
+            "failures": outcome["failures"],
+            "attempts": outcome["attempted"],
+            "pruned": {"files": pruned_files, "entries": pruned_entries},
+        }
+        if redelivery:
+            payload["redeliver"] = {"key": redelivery["key"],
+                                    "delivered": redelivery["delivered"],
+                                    "failed": redelivery["failed"]}
+        lines = [NOTIFIER_LABELS[dest_kind],
+                 "pass: %d receipts shown, %d reads ok, %d failed; gateway "
+                 "%s" % (len(outcome["rows"]), outcome["contacts"],
+                         outcome["failures"], gateway_state)]
+        for doc, name in zip(outcome["events"], outcome["event_names"]):
+            lines.append("event %s dedup=%s file=%s"
+                         % (doc["kind"], str(doc["dedup_key"])[:8], name))
+        lines.extend(delivery_lines)
+        if redelivery:
+            lines.append("redelivered %s: delivered %d, failed %d"
+                         % (str(redelivery["key"])[:8],
+                            redelivery["delivered"], redelivery["failed"]))
+        if pruned_files or pruned_entries:
+            lines.append("pruned %d event files and %d ledger entries"
+                         % (pruned_files, pruned_entries))
+        code = EXIT_TRANSPORT if _transport_dead(outcome) else EXIT_OK
+        payload["exit_code"] = code
+        ctx.finish(payload, lines)
+        if not args.watch:
+            return code
+        time.sleep(args.interval)
+
+
+# ---------------------------------------------------------------------------
+# Parser and entry point.
+# ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="g2h",
@@ -1285,12 +2577,68 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("capabilities", parents=[common],
                        help="GET /v1/capabilities and pretty-print it")
+    p = sub.add_parser("dashboard", parents=[common],
+                       help="read-only local view over g2h's own receipts "
+                       "(GET-only; never answers anything)")
+    p.add_argument("--serve", action="store_true",
+                   help="serve on loopback until Ctrl+C (default: print the "
+                   "page once)")
+    p.add_argument("--out", default=None, metavar="FILE",
+                   help="write the page to FILE instead of stdout")
+    p.add_argument("--port", type=int, default=None, metavar="N",
+                   help="port for --serve (default 8790, env "
+                   "G2H_DASHBOARD_PORT)")
+    p.add_argument("--bind", default="127.0.0.1", metavar="HOST",
+                   help="loopback only: 127.0.0.1 or localhost (anything "
+                   "else exits with usage)")
+    p.add_argument("--refresh", type=float, default=DASHBOARD_REFRESH_DEFAULT,
+                   dest="refresh", metavar="SECS",
+                   help="page meta refresh seconds; 0 disables (min %s)"
+                   % DASHBOARD_REFRESH_MIN)
+    p.add_argument("--poll-interval", type=float,
+                   default=DASHBOARD_POLL_DEFAULT, dest="poll_interval",
+                   metavar="SECS",
+                   help="serve-mode background poll interval in seconds "
+                   "(min %s)" % DASHBOARD_POLL_MIN)
+    p.add_argument("--max-runs", type=int, default=DASHBOARD_MAX_RUNS_DEFAULT,
+                   dest="max_runs", metavar="N",
+                   help="newest N receipts, others summarized as a count")
+    p = sub.add_parser("relay", parents=[common],
+                       help="observe approval lifecycle events into a local "
+                       "outbox; optional one-destination notifier")
+    p.add_argument("--once", action="store_true",
+                   help="one pass (default when neither --once nor --watch)")
+    p.add_argument("--watch", action="store_true",
+                   help="loop passes until Ctrl+C")
+    p.add_argument("--interval", type=float, default=RELAY_INTERVAL_DEFAULT,
+                   dest="interval", metavar="SECS",
+                   help="seconds between passes in --watch (min %s)"
+                   % RELAY_INTERVAL_MIN)
+    p.add_argument("--notify-url", default=None, dest="notify_url",
+                   metavar="URL",
+                   help="deliver events to one webhook URL (bearer token "
+                   "from %s; value never printed)" % NOTIFY_ENV_TOKEN)
+    p.add_argument("--notify-cmd", default=None, dest="notify_cmd",
+                   metavar="CMD",
+                   help="deliver events to one command (event JSON on "
+                   "stdin, exit 0 means delivered)")
+    p.add_argument("--redeliver", default=None, metavar="KEY_PREFIX",
+                   help="one human-initiated reattempt for one event whose "
+                   "dedup_key starts with the prefix")
+    p.add_argument("--prune-days", type=int, default=PRUNE_DAYS_DEFAULT,
+                   dest="prune_days", metavar="N",
+                   help="drop resolved events and ledger entries older than "
+                   "N days (default %d; receipts are never touched)"
+                   % PRUNE_DAYS_DEFAULT)
+    p.add_argument("--max-runs", type=int, default=DASHBOARD_MAX_RUNS_DEFAULT,
+                   dest="max_runs", metavar="N")
     return parser
 
 
 HANDLERS = {"dispatch": cmd_dispatch, "status": cmd_status, "wait": cmd_wait,
             "stop": cmd_stop, "resolve": cmd_resolve,
-            "capabilities": cmd_capabilities}
+            "capabilities": cmd_capabilities, "dashboard": cmd_dashboard,
+            "relay": cmd_relay}
 
 
 def main(argv=None) -> None:
