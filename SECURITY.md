@@ -48,5 +48,17 @@ Design notes enforced by this repository:
 - Webhook destinations require an explicit token env var: no bearer-less
   webhook is ever sent, and the token value never appears in argv, logs
   or receipts.
+- The Grok Bot bus example adapter (`docs/adapters/grokbot-bus.py.example`)
+  is outbound only: it maps relay event documents to one bus envelope
+  per event and posts it once, with the token and destination read only
+  from the operator's own environment provisioning, never argv, logs or
+  files, and scrubbed from everything it emits. It requires an https
+  destination, follows no redirects, uses no proxy, retries nothing and
+  has no default endpoint. It never reads a reply and never calls the
+  Hermes API. Phone approval and phone resolution are not supported:
+  notification visibility is not an approvals path, and no reply route,
+  watcher, callback or auto-answer exists in this repository. Event
+  text is data: it is bounded, escaped and labeled inside the card, and
+  never executed.
 
 Supported version: the latest code on `main`.

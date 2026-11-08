@@ -219,6 +219,22 @@ table above otherwise. `--json` adds `events`, `delivered`,
 `notify_failed`, `notifier`, `contacts`, `failures` and `pruned` to the
 payload.
 
+### Grok Bot phone cards (opt-in example, outbound only)
+
+`docs/adapters/grokbot-bus.py.example` is a ready-to-read example of one
+such command destination: it maps each event JSON to one Grok Bot bus
+envelope (`from: g2h`, thread `g2h-approvals`, one stable per-event id)
+and posts a scrubbed approval card to an https webhook, exactly once,
+token from your own environment provisioning, never argv, never logged.
+Cards carry profile, run, prompt, generation, kind, task text, control
+context (data only), freshness, expiry, and an immutable event
+fingerprint. Phones become visible, but that is all: phone approval and
+phone resolution are NOT supported by this repository and remain
+unsupported - there is no reply route, no watcher and no auto-answer;
+cards explicitly say the resolution happens on the Mac. See
+`docs/adapters/grokbot.md` and the security notes for the full
+boundaries before wiring anything.
+
 ## Run the tests
 
 The suite runs the real client as a subprocess against an in-process mock
