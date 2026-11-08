@@ -1,0 +1,256 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1680" height="1240" viewBox="0 0 1680 1240" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#57606a"/></marker></defs>
+  <rect x="0" y="0" width="1680" height="1240" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="40" y="38" font-size="18" font-weight="600" fill="#24292f">GrokBot2Hermes architecture: Grok Bot dispatches tasks to a local Hermes Agent gateway</text>
+  <text x="40" y="60" font-size="12" fill="#57606a">g2h 0.1.0. Python 3.9+ standard library only. HTTP contracts per docs/api-contracts.md, verified against Hermes Agent v0.22.7.</text>
+  <g>
+    <rect x="40" y="80" width="440" height="230" fill="#ffffff" stroke="#82b366"/>
+    <rect x="40" y="80" width="440" height="30" fill="#d5e8d4" stroke="#82b366"/>
+    <text x="260.0" y="99.5" font-size="13" font-weight="600" text-anchor="middle" fill="#24292f">People and coordinator</text>
+  </g>
+  <g>
+    <rect x="40" y="360" width="430" height="340" fill="#ffffff" stroke="#6c8ebf"/>
+    <rect x="40" y="360" width="430" height="30" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="255.0" y="379.5" font-size="13" font-weight="600" text-anchor="middle" fill="#24292f">g2h: dispatch and track CLI</text>
+  </g>
+  <g>
+    <rect x="520" y="80" width="430" height="290" fill="#ffffff" stroke="#b85450"/>
+    <rect x="520" y="80" width="430" height="30" fill="#f8cecc" stroke="#b85450"/>
+    <text x="735.0" y="99.5" font-size="13" font-weight="600" text-anchor="middle" fill="#24292f">Trust boundary (auth and egress)</text>
+  </g>
+  <g>
+    <rect x="1000" y="80" width="640" height="600" fill="#ffffff" stroke="#6c8ebf"/>
+    <rect x="1000" y="80" width="640" height="30" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="1320.0" y="99.5" font-size="13" font-weight="600" text-anchor="middle" fill="#24292f">Local Hermes gateway: Runs API</text>
+  </g>
+  <g>
+    <rect x="990" y="800" width="650" height="392" fill="#ffffff" stroke="#b85450"/>
+    <rect x="990" y="800" width="650" height="30" fill="#f8cecc" stroke="#b85450"/>
+    <text x="1315.0" y="819.5" font-size="13" font-weight="600" text-anchor="middle" fill="#24292f">Manual human control flow</text>
+  </g>
+  <g>
+    <rect x="1015" y="428" width="610" height="236" fill="#ffffff" stroke="#9673a6"/>
+    <rect x="1015" y="428" width="610" height="26" fill="#e1d5e7" stroke="#9673a6"/>
+    <text x="1320.0" y="445.5" font-size="13" font-weight="600" text-anchor="middle" fill="#24292f">Per-profile routing: /p/&lt;profile&gt;/v1/... (one key per profile)</text>
+  </g>
+  <g>
+    <rect x="60.0" y="124.0" width="170.0" height="70.0" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+    <text x="145.0" y="143.1" font-size="12.0" text-anchor="middle" fill="#24292f">
+      <tspan x="145.0" dy="0" font-weight="600">Human operator</tspan>
+      <tspan x="145.0" dy="17.0">assigns tasks</tspan>
+      <tspan x="145.0" dy="17.0">decides approvals</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="280.0" y="124.0" width="180.0" height="70.0" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+    <text x="370.0" y="143.1" font-size="12.0" text-anchor="middle" fill="#24292f">
+      <tspan x="370.0" dy="0" font-weight="600">Grok Bot</tspan>
+      <tspan x="370.0" dy="17.0">coordinating agent</tspan>
+      <tspan x="370.0" dy="17.0">dispatches via g2h</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="145.0" y="214.0" width="250.0" height="70.0" rx="6" fill="#d5e8d4" stroke="#82b366"/>
+    <text x="270.0" y="233.1" font-size="12.0" text-anchor="middle" fill="#24292f">
+      <tspan x="270.0" dy="0" font-weight="600">Adapters (examples)</tspan>
+      <tspan x="270.0" dy="17.0">docs/adapters/grokbot.md</tspan>
+      <tspan x="270.0" dy="17.0">grokbot-poll.sh.example</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="55.0" y="400.0" width="400.0" height="60.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="65.0" y="422.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="65.0" dy="0" font-weight="600">./g2h: three line sh launcher</tspan>
+      <tspan x="65.0" dy="17.0">g2h.py: one file; Python 3.9+ standard library only</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="55.0" y="470.0" width="400.0" height="80.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="65.0" y="494.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="65.0" dy="0" font-weight="600">Subcommands</tspan>
+      <tspan x="65.0" dy="17.0">dispatch, status, wait, stop, capabilities</tspan>
+      <tspan x="65.0" dy="17.0">resolve approval | clarify | unknown (operator only)</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="55.0" y="560.0" width="400.0" height="124.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="65.0" y="580.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="65.0" dy="0" font-weight="600">Options of note</tspan>
+      <tspan x="65.0" dy="17.0">--input, --input-file or --stdin (exactly one)</tspan>
+      <tspan x="65.0" dy="17.0">--profile NAME: routes under /p/&lt;profile&gt;/v1/</tspan>
+      <tspan x="65.0" dy="17.0">--base-url (default http://127.0.0.1:8642), --json</tspan>
+      <tspan x="65.0" dy="17.0">--timeout, --max-retries, --follow (SSE), --no-wait</tspan>
+      <tspan x="65.0" dy="17.0">--idempotency-key, --key-file (0600) or --key-stdin</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="535.0" y="114.0" width="400.0" height="64.0" rx="6" fill="#f8cecc" stroke="#b85450"/>
+    <text x="545.0" y="138.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="545.0" dy="0" font-weight="600">API key: G2H_API_KEY env, --key-file (0600), --key-stdin</tspan>
+      <tspan x="545.0" dy="17.0">never on argv; scrubbed from every output and receipt</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="535.0" y="186.0" width="400.0" height="40.0" rx="6" fill="#f8cecc" stroke="#b85450"/>
+    <text x="545.0" y="207.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="545.0" dy="0" font-weight="600">Authorization: Bearer sent only to the configured base url</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="535.0" y="234.0" width="400.0" height="110.0" rx="6" fill="#f8cecc" stroke="#b85450"/>
+    <text x="545.0" y="264.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="545.0" dy="0" font-weight="600">Redirects disabled: no Authorization on redirects</tspan>
+      <tspan x="545.0" dy="17.0">plain http only to loopback hosts, unless</tspan>
+      <tspan x="545.0" dy="17.0">--allow-insecure-http is passed (warns)</tspan>
+      <tspan x="545.0" dy="17.0">all output is redacted: key, Bearer, Authorization</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1015.0" y="120.0" width="610.0" height="40.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="1025.0" y="141.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1025.0" dy="0" font-weight="600">GET /v1/capabilities: probed by dispatch, wait and resolve unknown (fail soft)</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1015.0" y="168.0" width="610.0" height="40.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="1025.0" y="189.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1025.0" dy="0" font-weight="600">POST /v1/runs (Idempotency-Key; Idempotency-Replayed: true on replay)</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1015.0" y="216.0" width="610.0" height="40.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="1025.0" y="237.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1025.0" dy="0" font-weight="600">GET /v1/runs/{run_id}: status, output, usage, pending_controls</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1015.0" y="264.0" width="610.0" height="40.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="1025.0" y="285.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1025.0" dy="0" font-weight="600">GET /v1/runs/{run_id}/events: SSE; falls back to polling on failures</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1015.0" y="312.0" width="610.0" height="40.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="1025.0" y="333.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1025.0" dy="0" font-weight="600">POST /v1/runs/{run_id}/stop: reports stopping, never instant cancel</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1015.0" y="360.0" width="610.0" height="50.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="1025.0" y="377.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1025.0" dy="0" font-weight="600">POST /v1/runs/{run_id}/approval | /clarify | /resolve-unknown</tspan>
+      <tspan x="1025.0" dy="17.0">manual operator calls; the client never sends them by itself</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1040.0" y="476.0" width="270.0" height="130.0" rx="6" fill="#e1d5e7" stroke="#9673a6"/>
+    <text x="1175.0" y="508.1" font-size="12.0" text-anchor="middle" fill="#24292f">
+      <tspan x="1175.0" dy="0" font-weight="600">Hermes profile agent</tspan>
+      <tspan x="1175.0" dy="17.0">example: coder</tspan>
+      <tspan x="1175.0" dy="17.0">runs the dispatched task</tspan>
+      <tspan x="1175.0" dy="17.0">may park in waiting_for_approval</tspan>
+      <tspan x="1175.0" dy="17.0">surfaces pending_controls</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1335.0" y="476.0" width="270.0" height="130.0" rx="6" fill="#e1d5e7" stroke="#9673a6"/>
+    <text x="1470.0" y="516.6" font-size="12.0" text-anchor="middle" fill="#24292f">
+      <tspan x="1470.0" dy="0" font-weight="600">Hermes profile agent</tspan>
+      <tspan x="1470.0" dy="17.0">example: researcher</tspan>
+      <tspan x="1470.0" dy="17.0">same Runs API surface</tspan>
+      <tspan x="1470.0" dy="17.0">separate key per profile</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1040.0" y="616.0" width="565.0" height="40.0" rx="6" fill="#f5f5f5" stroke="#999999" stroke-dasharray="4 4"/>
+    <text x="1050.0" y="628.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1050.0" dy="0" font-weight="600">401: key not valid for this profile prefix.</tspan>
+      <tspan x="1050.0" dy="17.0">404: unknown run id, wrong profile or retention expired.</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="40.0" y="800.0" width="280.0" height="150.0" rx="6" fill="#fff2cc" stroke="#d6b656"/>
+    <text x="50.0" y="833.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="50.0" dy="0" font-weight="600">Crash-safe receipts</tspan>
+      <tspan x="50.0" dy="17.0">one 0600 file per dispatched task</tspan>
+      <tspan x="50.0" dy="17.0">0700 dir; atomic tmp file then rename</tspan>
+      <tspan x="50.0" dy="17.0">keeps task bytes (sha256) + idem key</tspan>
+      <tspan x="50.0" dy="17.0">after a crash: wait --receipt replays</tspan>
+      <tspan x="50.0" dy="17.0">stored bytes under the stored key</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="520.0" y="800.0" width="430.0" height="150.0" rx="6" fill="#ffe6cc" stroke="#d79b00"/>
+    <text x="530.0" y="825.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="530.0" dy="0" font-weight="600">Exit codes: the control plane</tspan>
+      <tspan x="530.0" dy="17.0">adapters and operators branch on exit codes, not prose</tspan>
+      <tspan x="530.0" dy="17.0">0 completed. 2 usage. 3 credential/config.</tspan>
+      <tspan x="530.0" dy="17.0">5 failed. 6 cancelled. 7 interrupted.</tspan>
+      <tspan x="530.0" dy="17.0">10 auth. 11 not found. 12 conflict. 13 unavailable.</tspan>
+      <tspan x="530.0" dy="17.0">14 timeout: still running at the deadline. 18 transport.</tspan>
+      <tspan x="530.0" dy="17.0">16 human control required (waiting_for_approval).</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1005.0" y="840.0" width="610.0" height="40.0" rx="6" fill="#f8cecc" stroke="#b85450"/>
+    <text x="1015.0" y="861.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1015.0" dy="0" font-weight="600">run parks in waiting_for_approval</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1005.0" y="894.0" width="610.0" height="54.0" rx="6" fill="#f8cecc" stroke="#b85450"/>
+    <text x="1015.0" y="922.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1015.0" dy="0" font-weight="600">g2h exits 16 and surfaces pending_controls verbatim</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1005.0" y="962.0" width="610.0" height="40.0" rx="6" fill="#f8cecc" stroke="#b85450"/>
+    <text x="1015.0" y="983.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1015.0" dy="0" font-weight="600">a HUMAN decides: approve once, deny, or answer the clarify question</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1005.0" y="1016.0" width="610.0" height="54.0" rx="6" fill="#f8cecc" stroke="#b85450"/>
+    <text x="1015.0" y="1035.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1015.0" dy="0" font-weight="600">operator: g2h resolve approval RUN_ID --request-id ... --generation N --choice once|deny</tspan>
+      <tspan x="1015.0" dy="17.0">or: g2h resolve clarify RUN_ID --request-id ... --generation N --answer ...</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1005.0" y="1084.0" width="610.0" height="40.0" rx="6" fill="#f8cecc" stroke="#b85450"/>
+    <text x="1015.0" y="1105.1" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1015.0" dy="0" font-weight="600">gateway receives the explicit POST; the run resumes</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="1005.0" y="1136.0" width="610.0" height="40.0" rx="6" fill="#f5f5f5" stroke="#999999" stroke-dasharray="4 4"/>
+    <text x="1015.0" y="1148.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="1015.0" dy="0" font-weight="600">Nothing auto-approves: the resolve command is typed by an operator;</tspan>
+      <tspan x="1015.0" dy="17.0">the client never answers a control by itself.</tspan>
+      </text>
+  </g>
+  <polyline points="230.0,159.0 280.0,159.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="255.0" y="163.0" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">tasks</text>
+  <polyline points="433.0,194.0 433.0,360.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="433.0" y="281.0" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">dispatches</text>
+  <polyline points="270.0,284.0 270.0,360.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="270.0" y="326.0" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">g2h wait --receipt ...</text>
+  <polyline points="470.0,480.0 490.0,480.0 490.0,225.0 520.0,225.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="490.0" y="351.5" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">requests</text>
+  <polyline points="950.0,225.0 1000.0,227.5" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="975.0" y="230.2" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">egress</text>
+  <polyline points="1000.0,497.0 470.0,490.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="735.0" y="497.5" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">statuses, SSE events, pending_controls</text>
+  <polyline points="100.0,700.0 100.0,800.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="100.0" y="754.0" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">one 0600 receipt per task</text>
+  <polyline points="320.0,860.0 350.0,860.0 350.0,700.0 400.0,700.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="350.0" y="774.0" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">replay: stored bytes + key</text>
+  <polyline points="427.0,700.0 427.0,775.0 649.0,775.0 649.0,800.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="513.0" y="779.0" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">exit code</text>
+  <polyline points="1310.0,800.0 1310.0,680.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="1310.0" y="744.0" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">explicit POST /approval, /clarify, /resolve-unknown</text>
+  <polyline points="1310.0,880.0 1310.0,894.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <polyline points="1310.0,948.0 1310.0,962.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <polyline points="1310.0,1002.0 1310.0,1016.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <polyline points="1310.0,1070.0 1310.0,1084.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+</svg>
