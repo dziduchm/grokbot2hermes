@@ -219,6 +219,26 @@ table above otherwise. `--json` adds `events`, `delivered`,
 `notify_failed`, `notifier`, `contacts`, `failures` and `pruned` to the
 payload.
 
+### Grok Bot phone cards (opt-in example, outbound only)
+
+`docs/adapters/grokbot-bus.py.example` is a ready-to-read example of one
+such command destination: it maps each event JSON to one Grok Bot bus
+envelope (`from: g2h`, thread `g2h-approvals`, one stable per-event id)
+and posts a scrubbed approval card to an https webhook, exactly once,
+token from your own environment provisioning, never argv, never logged.
+Cards carry profile, run, prompt, generation, kind, task text, control
+context (data only), freshness, expiry, and an immutable event
+fingerprint. Phones become visible, but that is all: this Grok bus
+integration is notification only; it has no phone response route. There
+is no reply path, watcher or auto-answer in this repo, and cards say so
+explicitly. Human approvals happen on a supported authenticated Hermes
+human control surface (the official Hermes web dashboard and the native
+Telegram integration support approve/clarify prompts for their own
+sessions); whether an existing g2h API run can attach to those surfaces
+is not verified, so this example does not promise it. See
+`docs/adapters/grokbot.md` and the security notes for the full
+boundaries before wiring anything.
+
 ## Run the tests
 
 The suite runs the real client as a subprocess against an in-process mock

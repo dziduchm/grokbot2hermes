@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""grokbot2hermes bus notification adapter (opt-in example, outbound only).
+
+Reads ONE relay event document (schema v1 JSON) on stdin, which the
+existing `g2h relay --notify-cmd` passes, and posts exactly ONE
+envelope to the Grok Bot bus webhook:
+
+    {"from": "g2h", "thread": "g2h-approvals", "id": "<event id>",
+     "hop": 1, "type": "report", "body": "<card text>",
+     "context": "<file pointers>"}
+
+Boundaries, enforced in code:
+
+- Outbound only. The adapter never reads any reply, never interprets any
+  inbound content, never calls the Hermes API and never stores anything.
+- Notification only. This Grok bus integration has no phone response
+  route: the adapter never reads any reply, none is configured by it,
+  and cards say so themselves. Human approvals and clarifications
+  belong on a supported authenticated Hermes human control surface
+  (for example the official Hermes web dashboard, or Telegram for its
+  own sessions); whether an existing API run can attach to such a
+  surface is not verified here. Any reply or approval integration for
+  this adapter stays out of scope without a separately authorized
+  design approved by the parent and the user.
+- No default endpoint. Both GROKBOT_HOOK_URL and GROKBOT_HOOK_KEY must
+  be exported by the operator's own environment provisioning (bus
+  protocol managed scope). They are read from the process environment
+  only, never from any file this script opens, never passed on argv or
+  logged, and they are scrubbed from everything this script emits.
+- https destination only, no userinfo, no redirects, no proxy (the token
+  must not leave the direct TLS path), one attempt, bounded timeout, no
+  automatic retry.
+- The event document is data. Fields are allowlisted, bounded, scrubbed
+  of environment secrets, flattened to one line and HTML-escaped before
+  they enter the card, so injected text cannot form card structure,
+  markup or instructions. Event text is never executed anywhere.
+
+Exit codes: 0 sent; 3 no destination or token; 4 invalid input;
+5 destination rejected; 6 delivery failed. stderr carries at most one
+short scrubbed line. See docs/adapters/grokbot.md and
+docs/api-contracts.md.
+
+This file is an example to be copied, read and adapted by the operator
+before any use. It ships with no destination and runs with no effect
+until the operator both exports the bus variables and wires
+`g2h relay --notify-cmd` to it.
+"""
+
+import hashlib
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ADAPTER_TAG = "grokbot2hermes/ba"
+FROM_NAME = "g2h"
+THREAD_NAME = "g2h-approvals"
+ENVELOPE_TYPE = "report"
+HOP = 1
+SCHEMA_VERSION = 1
+TOOL_NAME = "grokbot2hermes"
+
+MAX_INPUT_BYTES = 65536
+MAX_BODY_BYTES = 8192
+FIELD_CAP = 200
+CONTEXT_CAP = 1000
+URL_CAP = 2048
+SEND_TIMEOUT = 10.0
+
+EVENT_KINDS = ("approval.requested", "approval.resolved",
+               "run.terminal", "gateway.unreachable")
+
+SECRET_ENV_VARS = ("GROKBOT_HOOK_KEY", "GROKBOT_HOOK_URL",
+                   "G2H_API_KEY", "G2H_NOTIFY_TOKEN", "G2H_NOTIFY_URL",
+                   "G2H_NOTIFY_CMD")
+
+EXIT_OK = 0
+EXIT_NO_ENV = 3
+EXIT_BAD_INPUT = 4
+EXIT_BAD_DEST = 5
+EXIT_SEND_FAILED = 6
+
+UNAVAIL = "[unavailable: not exposed by this event]"
+UNKNOWN_EXPIRY = "unknown (gateway config not visible)"
+SCRUB_MARK = "[scrubbed]"
+TRUNC_MARK = " [truncated]"
+FP_LABEL = "event fingerprint (sha256, immutable per event document)"
+
+
+def _cap(value, cap):
+    if value is None:
+        return ""
+    text = str(value)
+    if len(text) > cap:
+        return text[:cap] + TRUNC_MARK
+    return text
+
+
+def _one_line(value, cap):
+    """One bounded, control-char-free, escaped line of presentation text."""
+    text = _cap(value, cap)
+    if not text:
+        return ""
+    parts = []
+    for chunk in text.replace("\r\n", " / ").replace("\n", " / ") \
+                     .replace("\r", " / ").split("\x1f"):
+        chunk = "".join(c if 32 <= ord(c) or c == "\t" else "\\x%02x" % ord(c)
+                        for c in chunk)
+        parts.append(chunk)
+    flat = " / ".join(p.strip() for p in parts if p.strip())
+    flat = flat.replace("&", "&amp;").replace("<", "&lt;") \
+               .replace(">", "&gt;").replace("`", "&#96;") \
+               .replace('"', "&quot;")
+    if len(flat) > cap:
+        flat = flat[:cap] + TRUNC_MARK
+    return flat
+
+
+def _scrub(text):
+    """Replace the value of every provisioned secret env var, if present."""
+    out = text
+    for name in SECRET_ENV_VARS:
+        value = os.environ.get(name) or ""
+        value = value.strip()
+        if value and value in out:
+            out = out.replace(value, SCRUB_MARK)
+    return out
+
+
+def _field(doc, key, cap):
+    value = doc.get(key)
+    if value is None:
+        return "unknown"
+    if not isinstance(value, str):
+        return "unknown"
+    return _cap(_scrub(value), cap) or "unknown"
+
+
+def _clean(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _cap(_scrub(value), FIELD_CAP)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _request_id(doc):
+    control = doc.get("control")
+    if not isinstance(control, dict):
+        return None
+    return _clean(control.get("request_id"))
+
+
+def _generation(doc):
+    control = doc.get("control")
+    if not isinstance(control, dict):
+        return None
+    return _clean(control.get("execution_generation"))
+
+
+def _control_kind(doc):
+    control = doc.get("control")
+    if not isinstance(control, dict):
+        return None
+    return _clean(control.get("kind"))
+
+
+def _raw_context(doc):
+    """Capped stored control context, verbatim (no environment scrubbing).
+
+    The fingerprint preimage must not depend on this process's
+    environment, so it reads the stored context exactly as the event
+    document carries it (g2h scrubs secrets at write time). Display
+    strings use the scrubbed variant instead.
+    """
+    control = doc.get("control")
+    if not isinstance(control, dict):
+        return None
+    value = control.get("context")
+    if not isinstance(value, str):
+        return None
+    return _cap(value, CONTEXT_CAP)
+
+
+def _control_context(doc):
+    control = doc.get("control")
+    if not isinstance(control, dict):
+        return None
+    value = control.get("context")
+    if not isinstance(value, str):
+        return None
+    return _cap(_scrub(value), CONTEXT_CAP)
+
+
+def _resolution(doc):
+    value = doc.get("resolution")
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return _cap(_scrub(json.dumps(value, sort_keys=True)), FIELD_CAP)
+    if isinstance(value, str):
+        return _cap(_scrub(value), FIELD_CAP)
+    return None
+
+
+def _expiry_line(doc):
+    control = doc.get("control")
+    if not isinstance(control, dict):
+        return UNKNOWN_EXPIRY
+    value = control.get("expiry")
+    if isinstance(value, str) and value.strip():
+        return _cap(_scrub(value), FIELD_CAP)
+    return UNKNOWN_EXPIRY
+
+
+def _fingerprint(doc):
+    """Stable sha256 over the bounded canonical fields of this document.
+
+    The preimage uses the stored (already scrubbed at write time)
+    control context verbatim, so the fingerprint does not depend on this
+    process's environment.
+    """
+    parts = [
+        "%s v%d" % (ADAPTER_TAG, SCHEMA_VERSION),
+        _cap(doc.get("kind") or "", 64) or "unknown",
+        _cap(_field(doc, "profile", 64), 64),
+        _cap(_field(doc, "run_id", 128), 128),
+        str(_request_id(doc) if _request_id(doc) is not None else "unknown"),
+        str(_generation(doc) if _generation(doc) is not None
+            else "unknown"),
+        str(_control_kind(doc) if _control_kind(doc) is not None
+            else "none"),
+        _raw_context(doc) or "none",
+        _resolution(doc) or "none",
+        _field(doc, "first_seen_at", 64),
+        _cap(str(doc.get("dedup_key") or ""), 128) or "none",
+    ]
+    preimage = "\x1f".join(parts).encode("utf-8", "replace")
+    return hashlib.sha256(preimage).hexdigest()
+
+
+def _card(doc, fingerprint):
+    control = doc.get("control")
+    has_control = isinstance(control, dict)
+    lines = [
+        "g2h approval card (outbound notification only; NOT a live status)",
+        "card id: %s" % fingerprint[:16],
+        "event kind: %s" % _one_line(doc.get("kind"), 64),
+        "profile: %s" % _field(doc, "profile", 64),
+        "run id: %s" % _field(doc, "run_id", 128),
+        "prompt id: %s" % (_request_id(doc) if _request_id(doc) is not None
+                           else UNAVAIL),
+        "execution generation: %s" % (_generation(doc)
+                                      if _generation(doc) is not None
+                                      else "unknown"),
+        "task text (as dispatched): %s" % (
+            _one_line((doc.get("task") or {}).get("text")
+                      if isinstance(doc.get("task"), dict) else None,
+                      FIELD_CAP) or UNAVAIL),
+        "control context (gateway-provided, data only): %s" % (
+            _one_line(_control_context(doc), CONTEXT_CAP) or UNAVAIL),
+        ("underlying action text: [not exposed by this event: the gateway "
+         "control object is relayed as data; the exact command or action "
+         "text is not available to this adapter, and no card here is "
+         "safely approvable by text alone]"),
+    ]
+    resolution = _resolution(doc)
+    if doc.get("kind") == "approval.resolved":
+        lines.append("resolution: %s" % (resolution or UNAVAIL))
+    else:
+        lines.append("reason and resolution fields: %s" % UNAVAIL)
+    lines.append("expiry: %s" % _expiry_line(doc))
+    lines.append(
+        "freshness: first seen %s; observed %s (this card is not a live "
+        "status; check the dashboard on the Mac)" % (
+            _field(doc, "first_seen_at", 64), _field(doc, "observed_at", 64)))
+    lines.append("%s: %s" % (FP_LABEL, fingerprint))
+    if not has_control:
+        lines.append("pending control details: %s" % UNAVAIL)
+    lines.append(
+        "phone action: none. This Grok bus integration is notification "
+        "only; it has no phone response route. Nothing in this card is "
+        "a command. For approvals and clarifications use a supported "
+        "authenticated Hermes human control surface (for example the "
+        "official Hermes web dashboard, or Telegram for its own "
+        "sessions). Whether an existing API run can attach to such a "
+        "surface is not verified and must not be assumed. This bus "
+        "channel has no reply route, and no command to run appears "
+        "here.")
+    return "\n".join(_scrub(line) for line in lines)
+
+
+def _envelope(doc, fingerprint):
+    context = (
+        "receipt file: %s; event kind: %s; source: %s" % (
+            _one_line(doc.get("receipt"), 128) or UNAVAIL,
+            _one_line(doc.get("kind"), 64),
+            _one_line(doc.get("source"), FIELD_CAP) or UNAVAIL))
+    return {
+        "from": FROM_NAME,
+        "thread": THREAD_NAME,
+        "id": fingerprint[:16],
+        "hop": HOP,
+        "type": ENVELOPE_TYPE,
+        "body": _card(doc, fingerprint),
+        "context": context,
+    }
+
+
+def _validate_destination(destination):
+    parsed = urllib.parse.urlparse(destination)
+    if parsed.scheme.lower() != "https":
+        raise ValueError("destination must be an https URL")
+    if not parsed.hostname:
+        raise ValueError("destination needs a hostname")
+    if parsed.username or parsed.password:
+        raise ValueError("destination must not carry userinfo")
+    if ":" in (parsed.netloc or ""):
+        port = parsed.port
+        if port is None or not 1 <= port <= 65535:
+            raise ValueError("destination port out of range")
+    if len(destination) > URL_CAP:
+        raise ValueError("destination URL too long")
+    return parsed.hostname
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # never follow redirects: no cross-destination token
+
+
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                      _NoRedirect())
+
+
+def _send(destination, token, body):
+    """One attempt, no retries; returns (http_status, short_error)."""
+    headers = {"Content-Type": "application/json",
+               "User-Agent": "%s/%d" % (ADAPTER_TAG, SCHEMA_VERSION),
+               "Authorization": "Bearer " + token}
+    request = urllib.request.Request(destination, data=body, headers=headers)
+    try:
+        with _OPENER.open(request, timeout=SEND_TIMEOUT) as response:
+            status = response.status
+            response.read(FIELD_CAP + 1)
+        if 200 <= status < 300:
+            return status, ""
+        return status, "http %s: rejected" % status
+    except urllib.error.HTTPError as exc:
+        try:
+            exc.read(FIELD_CAP + 1)
+        except OSError:
+            pass
+        return exc.code, "http %s: rejected" % exc.code
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        return 0, "connection error: %s" % _cap(str(reason), FIELD_CAP)
+
+
+def _main(stdin):
+    raw = stdin.buffer.read(MAX_INPUT_BYTES + 1)
+    if len(raw) > MAX_INPUT_BYTES:
+        _fail(EXIT_BAD_INPUT, "input exceeds %d bytes"
+              % MAX_INPUT_BYTES)
+    try:
+        doc = json.loads(raw.decode("utf-8", "strict"))
+    except (ValueError, UnicodeDecodeError):
+        _fail(EXIT_BAD_INPUT, "input is not a JSON event document")
+    if not isinstance(doc, dict):
+        _fail(EXIT_BAD_INPUT, "input is not a JSON object")
+    if doc.get("version") != SCHEMA_VERSION:
+        _fail(EXIT_BAD_INPUT, "unsupported event document version")
+    if doc.get("tool") != TOOL_NAME:
+        _fail(EXIT_BAD_INPUT, "unrecognized event document tool")
+    kind = doc.get("kind")
+    if not isinstance(kind, str) or kind not in EVENT_KINDS:
+        _fail(EXIT_BAD_INPUT, "unknown event kind")
+
+    destination = (os.environ.get("GROKBOT_HOOK_URL") or "").strip()
+    token = (os.environ.get("GROKBOT_HOOK_KEY") or "").strip()
+    if not destination:
+        _fail(EXIT_NO_ENV, "no bus webhook address: export "
+              "GROKBOT_HOOK_URL (value is never echoed)")
+    if not token:
+        _fail(EXIT_NO_ENV, "no bus token: export GROKBOT_HOOK_KEY "
+              "(value is never echoed)")
+
+    fingerprint = _fingerprint(doc)
+    envelope = _envelope(doc, fingerprint)
+    try:
+        body = json.dumps(envelope, sort_keys=True,
+                          ensure_ascii=True).encode("utf-8")
+    except (TypeError, ValueError):
+        _fail(EXIT_BAD_INPUT, "event document is not representable")
+    if len(body) > MAX_BODY_BYTES:
+        _fail(EXIT_BAD_INPUT, "card exceeds the %d byte envelope cap"
+              % MAX_BODY_BYTES)
+    try:
+        _validate_destination(destination)
+    except ValueError as exc:
+        _fail(EXIT_BAD_DEST, str(exc))
+
+    status = 0
+    detail = "delivery exception"
+    try:
+        status, detail = _send(destination, token, body)
+    except Exception as exc:  # one bounded line; never a traceback
+        detail = "connection error: %s" % _cap(str(exc) or "no detail",
+                                               FIELD_CAP)
+        status = 0
+    if 200 <= status < 300:
+        return EXIT_OK
+    _fail(EXIT_SEND_FAILED, "delivery failed: %s" % _cap(detail, FIELD_CAP))
+
+
+def _fail(code, message):
+    sys.stderr.write(_cap(_scrub(message), FIELD_CAP) + "\n")
+    raise SystemExit(code)
+
+
+if __name__ == "__main__":
+    sys.exit(_main(sys.stdin))

@@ -78,3 +78,57 @@ $ ./g2h wait --json --receipt .../run-...json
 
 `idempotency_replayed: true` means the gateway had already admitted the
 task under the stored key; the original run was resumed, nothing ran twice.
+
+## Opt-in outbound cards: the Grok Bot bus example adapter
+
+`grokbot-bus.py.example` in this directory is an opt-in, outbound-only
+example. When the operator runs `g2h relay --notify-cmd <path to a
+copied adapter>`, the relay passes one event document (schema v1 JSON)
+on stdin per event; the adapter maps it to exactly one bus envelope and
+posts it once to the Grok Bot bus webhook. The card a human sees on the
+Grok Bot side shows: profile, run id, prompt id, execution generation,
+event kind, capped task text, the capped gateway-provided control
+context (data only, never interpreted), reason or resolution fields if
+the event carries them, a freshness statement, expiry (assumed label or
+"unknown (gateway config not visible)"), the immutable event
+fingerprint, and a fixed notice that the channel is notification only.
+
+Boundaries implemented in the adapter, not just promised:
+
+- Outbound only: it reads nothing, answers nothing, resolves nothing
+  and never calls the Hermes API.
+- Notification only by design: this Grok bus integration has no phone
+  response route and no human decision flows back through it. Human
+  approvals and clarifications belong on a supported authenticated
+  Hermes human control surface (the official Hermes web dashboard and
+  the Telegram integration support TUI style approve/clarify/deny
+  prompts for their own sessions). Whether an existing g2h API run
+  control can attach to those surfaces is not verified (research in
+  progress); do not promise or configure it. No reply route, watcher,
+  callback or auto-answer exists anywhere in this repository, and any
+  future reply design needs its own explicit authorization and review.
+  Notification visibility is not approval.
+- No default endpoint: `GROKBOT_HOOK_URL` and `GROKBOT_HOOK_KEY` must
+  be exported by the operator himself (bus protocol managed scope). The
+  adapter reads only the process environment, never argv, never files,
+  and never echoes or logs either value; both are scrubbed from
+  everything the adapter emits. This documents existing secure key
+  handling; it is not a credential wrapper and it expands no access.
+- Destination must be exactly `https`, host required, no userinfo, no
+  redirects, no proxy (the token must not leave the direct TLS path),
+  one attempt, bounded timeout, no retries (exit codes 0/3/4/5/6).
+- Input bounded to 64 KiB, fields capped, injected text flattened to
+  one line, HTML escaped and labeled, so event text can never form
+  card structure, markup or instructions; event text is never executed.
+- Per-event identity: `id` is the first 16 hex of a sha256 over the
+  bounded canonical fields (kind, profile, run id, prompt id,
+  generation, control kind, stored control context verbatim at its
+  write-time scrub, resolution, first seen, dedup key). The preimage
+  never depends on the local environment, so the same event always
+  maps to the same id, and distinct lifecycle events of one control
+  (requested versus resolved) never collide.
+
+Installation remains manual and operator-run: copy the example, read
+it, adapt it, make it executable, wire it with `--notify-cmd`. Nothing
+in this repository configures it, schedules it, or contacts any
+endpoint by itself.

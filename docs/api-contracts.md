@@ -268,3 +268,52 @@ command both resolve, g2h exits with a usage error; a CLI flag beats a
 same-kind env var (`--notify-url` vs `G2H_NOTIFY_URL`, `--notify-cmd` vs
 `G2H_NOTIFY_CMD`). No destination means no delivery attempt, and the
 only retry is the human-initiated `--redeliver`.
+
+### Grok Bot bus adapter contract (outbound example, opt-in)
+
+`docs/adapters/grokbot-bus.py.example` maps one relay event document on
+stdin to exactly one Grok Bot bus envelope and posts it once:
+
+```json
+{"from": "g2h", "thread": "g2h-approvals", "id": "<sha16 of fingerprint>",
+ "hop": 1, "type": "report", "body": "<card text, capped>",
+ "context": "<receipt file pointer + event kind + source, capped>"}
+```
+
+- Identity: `id` = first 16 hex of `sha256` over
+  `grokbot2hermes/ba v1 | kind | profile | run_id | request_id |
+  execution_generation | control kind | stored control context
+  (capped, verbatim, environment independent) | resolution | 
+  first_seen_at | dedup_key`, joined with unit separators. The full
+  64 hex fingerprint appears in the card body. Task text is presentation
+  only and never enters the preimage.
+- Fail-closed order: read and bound stdin (64 KiB) then parse and
+  allowlist (`version`, `tool`, `kind` in the event kind set) before
+  any network step; missing `GROKBOT_HOOK_URL` or `GROKBOT_HOOK_KEY`
+  exits 3; non-`https` destination, missing host, userinfo or oversize
+  URL exits 5; malformed or foreign documents exit 4; send failures
+  exit 6 with one bounded scrubbed stderr line and no traceback.
+- One POST attempt, timeout 10 s, no redirects, no proxy (a local
+  proxy can never receive the token). The token and URL come from the
+  operator's environment provisioning only; neither is ever on argv,
+  logged, echoed, or written anywhere, and both are scrubbed from the
+  envelope, the card and stderr.
+- Card fields: profile, run id, prompt id (or an explicit
+  `[unavailable: ...]` marker), generation, kind, capped task text,
+  capped control context labeled as gateway-provided data, an
+  explanatory "underlying action text is not exposed" line, reason or
+  resolution when the event has them, freshness (not a live status),
+  expiry (known label or "unknown (gateway config not visible)"), the
+  full event fingerprint, and the fixed notification-only notice.
+  Injected text is flattened to one line, HTML escaped and capped; it
+  can never form card structure, markup or instructions and is never
+  executed.
+- This contract adds NO inbound path. The Grok bus integration is
+  notification only; it has no phone response route, and nothing here
+  reads replies, renders them, or trusts model-authored text as a
+  human decision. Approvals and clarifications belong on a supported
+  authenticated Hermes human control surface (the official Hermes web
+  dashboard, or Telegram for its own sessions); whether an existing
+  API run control can attach to those surfaces is not verified and is
+  not promised by this contract. Any future reply design is a
+  separate, explicitly authorized change.
