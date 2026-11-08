@@ -3,6 +3,7 @@
   <rect x="0" y="0" width="1680" height="1240" rx="14" fill="#ffffff" stroke="#d0d7de"/>
   <text x="40" y="38" font-size="18" font-weight="600" fill="#24292f">GrokBot2Hermes architecture: Grok Bot dispatches tasks to a local Hermes Agent gateway</text>
   <text x="40" y="60" font-size="12" fill="#57606a">g2h 0.1.0. Python 3.9+ standard library only. HTTP contracts per docs/api-contracts.md, verified against Hermes Agent v0.22.7.</text>
+  <text x="40" y="76" font-size="12" fill="#57606a">Includes an optional read-only local dashboard and approval event relay.</text>
   <g>
     <rect x="40" y="80" width="440" height="230" fill="#ffffff" stroke="#82b366"/>
     <rect x="40" y="80" width="440" height="30" fill="#d5e8d4" stroke="#82b366"/>
@@ -32,6 +33,11 @@
     <rect x="1015" y="428" width="610" height="236" fill="#ffffff" stroke="#9673a6"/>
     <rect x="1015" y="428" width="610" height="26" fill="#e1d5e7" stroke="#9673a6"/>
     <text x="1320.0" y="445.5" font-size="13" font-weight="600" text-anchor="middle" fill="#24292f">Per-profile routing: /p/&lt;profile&gt;/v1/... (one key per profile)</text>
+  </g>
+  <g>
+    <rect x="40" y="975" width="920" height="240" fill="#ffffff" stroke="#6c8ebf"/>
+    <rect x="40" y="975" width="920" height="30" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="500.0" y="994.5" font-size="13" font-weight="600" text-anchor="middle" fill="#24292f">g2h observers (opt-in, local, read-only over g2h's own receipts)</text>
   </g>
   <g>
     <rect x="60.0" y="124.0" width="170.0" height="70.0" rx="6" fill="#d5e8d4" stroke="#82b366"/>
@@ -70,6 +76,7 @@
       <tspan x="65.0" dy="0" font-weight="600">Subcommands</tspan>
       <tspan x="65.0" dy="17.0">dispatch, status, wait, stop, capabilities</tspan>
       <tspan x="65.0" dy="17.0">resolve approval | clarify | unknown (operator only)</tspan>
+      <tspan x="65.0" dy="17.0">dashboard (read-only snapshot), relay (events, opt-in)</tspan>
       </text>
   </g>
   <g>
@@ -229,6 +236,46 @@
       <tspan x="1015.0" dy="17.0">the client never answers a control by itself.</tspan>
       </text>
   </g>
+  <g>
+    <rect x="55.0" y="1019.0" width="280.0" height="180.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="65.0" y="1038.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="65.0" dy="0" font-weight="600">Dashboard: opt-in, read-only</tspan>
+      <tspan x="65.0" dy="17.0">g2h dashboard --serve | --out snapshot.html</tspan>
+      <tspan x="65.0" dy="17.0">loopback 127.0.0.1 or localhost, GET only</tspan>
+      <tspan x="65.0" dy="17.0">CSP default-src 'none'; style-src 'self'; nosniff</tspan>
+      <tspan x="65.0" dy="17.0">no JS, cookies, sessions or forms</tspan>
+      <tspan x="65.0" dy="17.0">renders g2h receipts; mutates nothing</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="355.0" y="1019.0" width="300.0" height="180.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="365.0" y="1038.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="365.0" dy="0" font-weight="600">Relay: opt-in event history</tspan>
+      <tspan x="365.0" dy="17.0">g2h relay --once | --watch</tspan>
+      <tspan x="365.0" dy="17.0">events: approval.requested, approval.resolved,</tspan>
+      <tspan x="365.0" dy="17.0">run.terminal, gateway.unreachable</tspan>
+      <tspan x="365.0" dy="17.0">dedup ledger approvals.json (0600), restart safe</tspan>
+      <tspan x="365.0" dy="17.0">one delivery attempt, no auto retries</tspan>
+      <tspan x="365.0" dy="17.0">--prune-days 30; --redeliver (human only)</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="675.0" y="1019.0" width="270.0" height="80.0" rx="6" fill="#dae8fc" stroke="#6c8ebf"/>
+    <text x="685.0" y="1038.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="685.0" dy="0" font-weight="600">Notifier: generic, opt-in</tspan>
+      <tspan x="685.0" dy="17.0">--notify-url (webhook POST) or --notify-cmd</tspan>
+      <tspan x="685.0" dy="17.0">G2H_NOTIFY_TOKEN: Authorization Bearer</tspan>
+      <tspan x="685.0" dy="17.0">one attempt per event; only human retries</tspan>
+      </text>
+  </g>
+  <g>
+    <rect x="675.0" y="1109.0" width="270.0" height="80.0" rx="6" fill="#f5f5f5" stroke="#999999" stroke-dasharray="4 4"/>
+    <text x="685.0" y="1128.6" font-size="12.0" text-anchor="start" fill="#24292f">
+      <tspan x="685.0" dy="0" font-weight="600">Real destination (for example an agent bus):</tspan>
+      <tspan x="685.0" dy="17.0">NOT wired in this repo; no URL or token shipped</tspan>
+      <tspan x="685.0" dy="17.0">opt-in, requires Marcin's explicit approval</tspan>
+      </text>
+  </g>
   <polyline points="230.0,159.0 280.0,159.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
   <text x="255.0" y="163.0" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">tasks</text>
   <polyline points="433.0,194.0 433.0,360.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
@@ -253,4 +300,10 @@
   <polyline points="1310.0,948.0 1310.0,962.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
   <polyline points="1310.0,1002.0 1310.0,1016.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
   <polyline points="1310.0,1070.0 1310.0,1084.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <polyline points="180.0,950.0 180.0,975.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="180.0" y="966.0" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">reads 0600 receipts (never mutates)</text>
+  <polyline points="655.0,1089.0 665.0,1089.0 665.0,1059.0 675.0,1059.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="665.0" y="1078.0" font-size="11" fill="#57606a" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="4">events</text>
+  <polyline points="810.0,1099.0 810.0,1109.0" fill="none" stroke="#999999" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+  <text x="818.0" y="1104.5" font-size="11" fill="#57606a" text-anchor="start" paint-order="stroke" stroke="#ffffff" stroke-width="4">no default URL or token</text>
 </svg>

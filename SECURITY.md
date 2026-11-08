@@ -31,5 +31,18 @@ Design notes enforced by this repository:
   flag.
 - Stop is best effort: the client reports `stopping`, never instant
   cancellation.
+- The dashboard is loopback-only, GET-only, and header-locked: no auth
+  layer is added on purpose because there is nothing to authorize
+  locally; the loopback bind plus the read-only code path is the whole
+  boundary. It is opt-in and off unless run.
+- The relay writes 0600 event files and a 0600 ledger in the same 0700
+  directory and never mutates a receipt. One optional notifier
+  destination, configured only by the operator; its URL, command and
+  token are never printed, stored or replayed, one failed attempt is
+  recorded without automatic retries, and g2h refuses to run with two
+  destinations configured at once.
+- Webhook destinations require an explicit token env var: no bearer-less
+  webhook is ever sent, and the token value never appears in argv, logs
+  or receipts.
 
 Supported version: the latest code on `main`.
