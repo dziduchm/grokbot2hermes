@@ -13,10 +13,15 @@ Boundaries, enforced in code:
 
 - Outbound only. The adapter never reads any reply, never interprets any
   inbound content, never calls the Hermes API and never stores anything.
-- Phone approval or resolution is NOT supported. Cards are notifications;
-  they say so themselves. There is no reply route in this adapter, none
-  is configured by it, and none will exist without a separately
-  authorized design approved by the parent and the user.
+- Notification only. This Grok bus integration has no phone response
+  route: the adapter never reads any reply, none is configured by it,
+  and cards say so themselves. Human approvals and clarifications
+  belong on a supported authenticated Hermes human control surface
+  (for example the official Hermes web dashboard, or Telegram for its
+  own sessions); whether an existing API run can attach to such a
+  surface is not verified here. Any reply or approval integration for
+  this adapter stays out of scope without a separately authorized
+  design approved by the parent and the user.
 - No default endpoint. Both GROKBOT_HOOK_URL and GROKBOT_HOOK_KEY must
   be exported by the operator's own environment provisioning (bus
   protocol managed scope). They are read from the process environment
@@ -277,10 +282,15 @@ def _card(doc, fingerprint):
     if not has_control:
         lines.append("pending control details: %s" % UNAVAIL)
     lines.append(
-        "phone action: none. This channel is notification only. Approval "
-        "from the phone is NOT supported and needs a separately authorized "
-        "design; resolution happens on the Mac by the operator. There is "
-        "no reply route on this channel and no command to run here.")
+        "phone action: none. This Grok bus integration is notification "
+        "only; it has no phone response route. Nothing in this card is "
+        "a command. For approvals and clarifications use a supported "
+        "authenticated Hermes human control surface (for example the "
+        "official Hermes web dashboard, or Telegram for its own "
+        "sessions). Whether an existing API run can attach to such a "
+        "surface is not verified and must not be assumed. This bus "
+        "channel has no reply route, and no command to run appears "
+        "here.")
     return "\n".join(_scrub(line) for line in lines)
 
 

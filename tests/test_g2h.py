@@ -1818,7 +1818,15 @@ class GrokBusAdapterCase(unittest.TestCase):
                       card)
         self.assertIn("expiry: %s" % EXPIRY_LABEL, card)
         self.assertIn("phone action: none", card)
-        self.assertIn("Approval from the phone is NOT supported", card)
+        self.assertIn("This Grok bus integration is notification only",
+                      card)
+        self.assertIn("no phone response route", card)
+        self.assertIn("use a supported authenticated Hermes human control",
+                      card)
+        self.assertIn("Whether an existing API run can attach to such a "
+                      "surface is not verified", card)
+        self.assertNotIn("resolution happens on the Mac", card)
+        self.assertNotIn("Approval from the phone is NOT supported", card)
         text = body.decode("utf-8")
         for secret in (BUS_CANARY_TOKEN, BUS_CANARY_URL, BUS_CANARY_G2H):
             self.assertNotIn(secret, text)

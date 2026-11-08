@@ -281,7 +281,7 @@
     <text x="685.0" y="1218.6" font-size="12.0" text-anchor="start" fill="#24292f">
       <tspan x="685.0" dy="0" font-weight="600">Phone cards example: grokbot-bus.py.example</tspan>
       <tspan x="685.0" dy="17.0">opt-in --notify-cmd; outbound events to the bus</tspan>
-      <tspan x="685.0" dy="17.0">no reply route: phone approval NOT supported</tspan>
+      <tspan x="685.0" dy="17.0">notification only; no phone response route</tspan>
       </text>
   </g>
   <polyline points="230.0,159.0 280.0,159.0" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr)"/>

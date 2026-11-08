@@ -308,8 +308,12 @@ stdin to exactly one Grok Bot bus envelope and posts it once:
   Injected text is flattened to one line, HTML escaped and capped; it
   can never form card structure, markup or instructions and is never
   executed.
-- This contract adds NO inbound path. Phone approval and phone
-  resolution are NOT supported and remain unsupported; nothing here
+- This contract adds NO inbound path. The Grok bus integration is
+  notification only; it has no phone response route, and nothing here
   reads replies, renders them, or trusts model-authored text as a
-  human decision. Any future reply design is a separate, explicitly
-  authorized change.
+  human decision. Approvals and clarifications belong on a supported
+  authenticated Hermes human control surface (the official Hermes web
+  dashboard, or Telegram for its own sessions); whether an existing
+  API run control can attach to those surfaces is not verified and is
+  not promised by this contract. Any future reply design is a
+  separate, explicitly authorized change.

@@ -97,11 +97,16 @@ Boundaries implemented in the adapter, not just promised:
 
 - Outbound only: it reads nothing, answers nothing, resolves nothing
   and never calls the Hermes API.
-- Phone approval and phone resolution are NOT and remain UNSUPPORTED:
-  no human decision flows back through this channel, and no reply
-  route, watcher, callback or auto-answer exists anywhere in this
-  repository. Any future phone approval or resolution design needs
-  its own explicit authorization and review before anything is built.
+- Notification only by design: this Grok bus integration has no phone
+  response route and no human decision flows back through it. Human
+  approvals and clarifications belong on a supported authenticated
+  Hermes human control surface (the official Hermes web dashboard and
+  the Telegram integration support TUI style approve/clarify/deny
+  prompts for their own sessions). Whether an existing g2h API run
+  control can attach to those surfaces is not verified (research in
+  progress); do not promise or configure it. No reply route, watcher,
+  callback or auto-answer exists anywhere in this repository, and any
+  future reply design needs its own explicit authorization and review.
   Notification visibility is not approval.
 - No default endpoint: `GROKBOT_HOOK_URL` and `GROKBOT_HOOK_KEY` must
   be exported by the operator himself (bus protocol managed scope). The

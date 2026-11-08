@@ -228,10 +228,14 @@ and posts a scrubbed approval card to an https webhook, exactly once,
 token from your own environment provisioning, never argv, never logged.
 Cards carry profile, run, prompt, generation, kind, task text, control
 context (data only), freshness, expiry, and an immutable event
-fingerprint. Phones become visible, but that is all: phone approval and
-phone resolution are NOT supported by this repository and remain
-unsupported - there is no reply route, no watcher and no auto-answer;
-cards explicitly say the resolution happens on the Mac. See
+fingerprint. Phones become visible, but that is all: this Grok bus
+integration is notification only; it has no phone response route. There
+is no reply path, watcher or auto-answer in this repo, and cards say so
+explicitly. Human approvals happen on a supported authenticated Hermes
+human control surface (the official Hermes web dashboard and the native
+Telegram integration support approve/clarify prompts for their own
+sessions); whether an existing g2h API run can attach to those surfaces
+is not verified, so this example does not promise it. See
 `docs/adapters/grokbot.md` and the security notes for the full
 boundaries before wiring anything.
 
