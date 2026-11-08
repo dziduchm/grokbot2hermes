@@ -1645,6 +1645,14 @@ def diff_receipt(cfg: Config, receipt: dict, receipt_name: str, run_id: str,
         entry = entries.get(key)
         if entry is not None and entry.get("state") in LEDGER_OPEN_STATES:
             continue  # already requested; do not re-emit on resume
+        if entry is not None and entry.get("state") == "resolved":
+            # Pathological reappearance of an identical control identity
+            # (same run_id:prompt_id:generation) after its entry already
+            # resolved: record the observation, never re-emit. A genuinely
+            # new control carries a new generation and a new dedup key.
+            entry["last_seen_at"] = now
+            entries[key] = entry
+            continue
         if entry is None:
             entry = _new_entry(run_id, element, _control_kind(element),
                                "seen", now)
@@ -1870,8 +1878,13 @@ def find_pr_link(texts):
     return None
 
 
-def _freshness_label(row: dict, failures: int,
-                     freshness_interval: float) -> tuple:
+def _freshness_label(row: dict, freshness_interval: float) -> tuple:
+    """Per-row freshness verdict.
+
+    A failed status read is recorded on that run's own receipt
+    (last_error), so staleness from transport stays scoped to the run
+    whose read failed; other rows keep their own age-based verdict.
+    """
     status = row.get("status")
     if row.get("run_id") is None:
         return ("unknown (no run id yet; dispatch may have failed pre-create;"
@@ -1880,8 +1893,9 @@ def _freshness_label(row: dict, failures: int,
         return ("fresh (terminal; shown from receipt)", False)
     if status == "unknown":
         return ("unknown (gateway reports status unknown)", True)
-    if failures:
-        return ("stale (gateway unreachable)", True)
+    if row.get("last_error"):
+        return ("stale (last status read failed; see the receipt's "
+                "last_error)", True)
     last_ok = _parse_iso_seconds(row.get("last_ok_at"))
     if last_ok is None:
         return ("unknown (no successful status read yet)", True)
@@ -1943,8 +1957,7 @@ def build_snapshot(cfg: Config, rows: list, ledger: dict, dest_kind: str,
     entries = ledger.get("entries") or {}
     runs = []
     for row in rows:
-        label, stale_flag = _freshness_label(row, failures,
-                                             freshness_interval)
+        label, stale_flag = _freshness_label(row, freshness_interval)
         decisions = _open_decisions(row, entries)
         blockers = _blockers(row, stale_flag, entries)
         pr_link = find_pr_link([("input", row.get("task")),
@@ -2108,7 +2121,10 @@ def resolve_notifier_destination(ctx: Ctx, args) -> tuple:
     if kind == "url":
         parts = urllib.parse.urlparse(value)
         if parts.scheme not in ("http", "https") or not parts.netloc:
-            ctx.die(EXIT_USAGE, "invalid --notify-url URL: %r" % value)
+            ctx.die(EXIT_USAGE,
+                    "invalid notifier URL from %s: expected an "
+                    "http://host or https://host URL; the value is "
+                    "never echoed" % where)
         token = os.environ.get(NOTIFY_ENV_TOKEN) or ""
         if not token.strip():
             ctx.die(EXIT_CREDENTIAL,

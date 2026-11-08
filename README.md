@@ -204,8 +204,9 @@ The notifier is generic and opt-in: exactly one destination (a URL and a
 command together are refused as a usage error; a CLI flag beats the
 same-kind env var), one delivery attempt per event per pass, failures
 recorded in the ledger and never retried automatically. The webhook
-receives the full event JSON with `Authorization: Bearer <token>` when
-`G2H_NOTIFY_TOKEN` is set (required for the webhook; name only in
+receives the full event JSON with an `Authorization: Bearer` header
+carrying the token from `G2H_NOTIFY_TOKEN` (required for the webhook;
+name only in
 output; the value never appears in argv, logs or receipts); the command
 destination gets the same JSON on stdin and exit 0 means delivered. No
 destination exists by default: this repository ships no URL, no token

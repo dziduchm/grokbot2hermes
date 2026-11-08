@@ -22,7 +22,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(TESTS_DIR)
@@ -42,15 +42,31 @@ KEY_ENV_VARS = ("G2H_API_KEY", "G2H_BASE_URL", "G2H_RECEIPT_DIR",
                 "G2H_NOTIFY_CMD", "G2H_NOTIFY_TOKEN", "G2H_DASHBOARD_PORT")
 
 
-class FixtureCase(unittest.TestCase):
+if TYPE_CHECKING:
+    from typing import Callable
+
+
+class _Harness(object):
     """Shared harness: fresh mock, fresh scratch receipt dir, subprocess.
 
     Note: the researcher profile name is used because it already appears in
     upstream Hermes documentation as an example profile; it mocks locally.
+
+    Deliberately not a unittest.TestCase at runtime: the two matrix classes
+    below mix it in, so this plumbing exists exactly once. The earlier
+    DashboardRelayCase(FixtureCase) inheritance re-ran all 24 original
+    tests a second time, doubling wall time without adding assurance.
     """
 
     maxDiff = None
     mock: Optional[MockHermes]
+
+    if TYPE_CHECKING:
+        # The runtime base is object; only these TestCase members are used
+        # by the harness helpers, declared so the checker sees them.
+        assertTrue: Callable[..., None]
+        assertEqual: Callable[..., None]
+        assertNotIn: Callable[..., None]
 
     def setUp(self):
         self.ws = tempfile.mkdtemp(prefix="g2h-fixture-")
@@ -115,6 +131,10 @@ class FixtureCase(unittest.TestCase):
     def read_receipt(self, path):
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
+
+
+class FixtureCase(_Harness, unittest.TestCase):
+    """Original fixture matrix: dispatch, poll, exit codes, key handling."""
 
     # -----------------------------------------------------------------
     # Fixture 1: happy path dispatch, poll, terminal completed.
@@ -591,7 +611,7 @@ class FixtureCase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class DashboardRelayCase(FixtureCase):
+class DashboardRelayCase(_Harness, unittest.TestCase):
     """Mock fixtures for g2h dashboard and g2h relay (approval lifecycle,
     dedup, notifier ok/fail/timeout, outbox hygiene, never-POST check)."""
 
@@ -1298,6 +1318,7 @@ class DashboardRelayCase(FixtureCase):
         self.assertEqual(
             ISO_STAMP_RE.sub("<ts>", static_html).replace("\n", ""),
             ISO_STAMP_RE.sub("<ts>", serve_html).replace("\n", ""))
+        self.assert_no_control_posts("identical out-vs-serve render")
 
     def test_41_dashboard_mock_serve_headers_and_methods(self):
         proc = self.client("dispatch", "--json", "--input", "mock serve page")
@@ -1481,6 +1502,98 @@ class DashboardRelayCase(FixtureCase):
         self.assertIn("the gateway was never contacted", html)
         self.assertEqual(self.status_reads(), [])
         self.assert_no_control_posts("keyless out with receipts")
+
+    def test_47_dashboard_mock_partial_failure_freshness_scoped(self):
+        """One dead run must not mark an alive run stale (per-row scope).
+
+        The dead run's own receipt records last_error and its row goes
+        stale; the alive run keeps its own fresh, age-based verdict.
+        """
+        raw_body = json.dumps({"input": "mock partial freshness"}).encode(
+            "utf-8")
+        receipt = {
+            "version": 1,
+            "tool": "grokbot2hermes",
+            "profile": "default",
+            "base_url": "mock://unset",
+            "idempotency_key": "idem_mock_gone404",
+            "body_b64": base64.b64encode(raw_body).decode("ascii"),
+            "body_sha256": hashlib.sha256(raw_body).hexdigest(),
+            "run_id": "run_mock_gone404",
+            "status": "running",
+            "idempotency_replayed": False,
+            "created_at": self.iso_ago(60),
+            "updated_at": self.iso_ago(60),
+        }
+        os.makedirs(self.receipts, mode=0o700, exist_ok=True)
+        path = os.path.join(self.receipts, "gone404.mock.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(receipt, sort_keys=True, indent=2))
+        os.chmod(path, 0o600)
+        self.start_mock(default_seq=["waiting_for_approval"])
+        proc = self.dispatch_scenario("FRESHB", "alive pending run")
+        self.assertEqual(proc.returncode, 16, proc.stderr)
+        b_run_id = self.json_out(proc)["run_id"]
+        dash = self.client("dashboard", "--json")
+        self.assertEqual(dash.returncode, 0,
+                         "one live contact keeps the transport alive")
+        rows = {row["receipt"]: row
+                for row in self.json_out(dash)["snapshot"]["runs"]}
+        dead = rows["gone404.mock.json"]
+        alive = next(row for row in rows.values()
+                     if row["run_id"] == b_run_id)
+        self.assertIsNot(dead, alive)
+        self.assertTrue(dead["freshness"]["stale"], dead["freshness"])
+        self.assertIn("stale", dead["freshness"]["label"])
+        self.assertIn("last status read failed", dead["freshness"]["label"])
+        self.assertFalse(alive["freshness"]["stale"],
+                         alive["freshness"]["label"])
+        self.assertIn("fresh", alive["freshness"]["label"])
+        self.assert_no_control_posts("partial-failure freshness pass")
+
+    def test_48_relay_mock_resolved_reappearance_never_reemits(self):
+        self.start_mock(default_seq=["waiting_for_approval"])
+        proc = self.dispatch_scenario("GHOST1", "ghost control reappears")
+        self.assertEqual(proc.returncode, 16, proc.stderr)
+        snap = self.relay()
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        docs = self.read_events()
+        self.assertEqual([d["kind"] for d in docs], ["approval.requested"])
+        dedup = docs[0]["dedup_key"]
+        ledger = self.read_ledger()
+        assert ledger is not None
+        seen_at = ledger["entries"][dedup]["last_seen_at"]
+
+        def mark_resolved(doc):
+            entry = doc["entries"][dedup]
+            entry["state"] = "resolved"
+            entry["resolution"] = "answered"
+
+        self.rewrite_ledger(mark_resolved)
+        # The identical identity (same run_id:prompt_id:generation) presents
+        # again. A resolved entry observes, holds its state, emits nothing.
+        self.clear_recorder()
+        snap = self.relay()
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        self.assertEqual([e["kind"] for e in self.json_out(snap)["events"]],
+                         [], "resolved identity must not re-emit")
+        self.assertEqual([d["kind"] for d in self.read_events()],
+                         ["approval.requested"])
+        ledger = self.read_ledger()
+        assert ledger is not None
+        entry = ledger["entries"][dedup]
+        self.assertEqual(entry["state"], "resolved")
+        self.assertGreaterEqual(entry["last_seen_at"], seen_at)
+        self.assert_no_control_posts("resolved reappearance pass")
+
+    def test_49_relay_notify_invalid_url_not_echoed(self):
+        proc = self.client("relay", "--once", "--json", "--notify-url",
+                           "nota-host.example")
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("invalid notifier URL", proc.stderr)
+        self.assertIn("never echoed", proc.stderr)
+        self.assertNotIn("nota-host.example", proc.stderr)
+        self.assert_no_control_posts("invalid notify url")
 
 
 def _free_loopback_port():

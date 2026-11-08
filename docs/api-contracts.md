@@ -172,21 +172,33 @@ The fields below are g2h-local file formats (not gateway HTTP): receipts
 written by g2h and consumed by the dashboard and relay. They carry
 `"version": 1` and `"tool": "grokbot2hermes"`.
 
-### Receipt additions (version 2 receipts)
+### Receipt additions (version 1 receipts)
 
-Dispatch and every tracking command may update receipts with:
+Receipts stay `"version": 1` forever; this PR only adds keys, and every
+consumer tolerates unknown keys (proven by a regression test that feeds
+a legacy receipt with extra keys through a full read). Dispatch and the
+status polling pass may update receipts with:
 
 ```json
-{"version": 2,
+{"version": 1,
  "pending_controls": [{"prompt_id": "...", "execution_generation": 4,
-                        "...other gateway fields...": null}],
- "pending_controls_seen_at": "2026-01-01T00:00:00Z"}
+                       "...other gateway fields...": null}],
+ "last_ok_at": "2026-01-01T00:00:00Z",
+ "last_error": "HTTP 404 for GET /v1/runs/run_x: not found",
+ "last_event": {"name": "approval.requested", "at": "2026-01-01T00:05:00Z",
+                "snippet": "<capped status snapshot>"}}
 ```
 
 `pending_controls` is `null` when the last known state had none and a
-list while waiting. Unknown gateway fields inside a control element are
-preserved verbatim and never interpreted; the relay only reads
-`prompt_id`, `execution_generation` and the element's `kind` shape.
+list while waiting (written at dispatch and refreshed from the status
+read). `last_ok_at` is stamped and `last_error` cleared on every
+successful status read; a failed read writes `last_error` (scrubbed of
+the key, capped at 200 characters) and leaves the previously observed
+data untouched. `last_event` names the most recent status change or
+relay event with a short snippet. Unknown gateway fields inside a
+control element are preserved verbatim and never interpreted; the relay
+only reads `prompt_id`, `execution_generation` and the element's `kind`
+shape.
 
 ### Relay event document (schema v1)
 
@@ -244,8 +256,9 @@ rendered page is the only keyless surface and it stays loopback-only.
 ### Notifier contract
 
 Delivery happens after a pass persists events. Webhook: POST of the event
-JSON to the configured URL, `Content-Type: application/json`,
-`Authorization: Bearer <token>` when `G2H_NOTIFY_TOKEN` is set (required
+JSON to the configured URL, `Content-Type: application/json`, an
+`Authorization: Bearer` header carrying the token from
+`G2H_NOTIFY_TOKEN` (required
 for any webhook destination). The destination must return 2xx; anything
 else, a transport error or a 10 second timeout records one failed attempt
 (`notify_failed`) with the error text (token value never included).
