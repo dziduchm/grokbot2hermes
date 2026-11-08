@@ -40,6 +40,7 @@ class MockConfig:
         self.ledger = {}        # idempotency key -> {sha256, run_id}
         self.create_failures = []   # list of (status, code, retry_after)
         self.create_delay = 0.0
+        self.status_delay = 0.0     # per status-read delay in seconds
         self.create_status = 202    # first-create success status
         self.stop_status = 200      # stop success status (doc leaves open)
         self.default_seq = ["running", "completed"]
@@ -322,6 +323,8 @@ class MockHandler(BaseHTTPRequestHandler):
         state = config.runs.get(run_id)
         if state is None or config.run_profiles.get(run_id) != profile:
             return self._send_json(404, {"error": {"code": "not_found"}})
+        if config.status_delay:
+            time.sleep(config.status_delay)
         return self._send_json(200, state.status_body())
 
     def _stop(self, config, profile, run_id):

@@ -2042,20 +2042,12 @@ def _serve_dashboard(cfg: Config, ctx: Ctx, key: str, args) -> int:
     dest_kind, _value = resolve_notifier_destination(ctx, args)
     lock = threading.Lock()
     holder = {"snapshot": None, "error": None, "lock": lock}
-    try:
-        outcome = poll_pass(cfg, ctx, key, max_runs=args.max_runs)
-        snapshot = build_snapshot(
-            cfg, outcome["rows"], outcome["ledger"], dest_kind,
-            outcome["contacts"], outcome["failures"], outcome["attempted"],
-            args.poll_interval, outcome["receipts_total"], args.max_runs)
-        with lock:
-            holder["snapshot"] = snapshot
-    except G2hExit as exc:
-        if exc.code in (EXIT_AUTH, EXIT_CREDENTIAL):
-            raise
-        with lock:
-            holder["error"] = scrub(str(exc))
     stop = threading.Event()
+    # Bind the socket before the first gateway read: a slow gateway delays
+    # the first snapshot, never the socket. The poller thread performs the
+    # initial read; until it lands the page shows its empty state, and an
+    # auth failure stops the poller and shows the scrubbed error banner
+    # (the page stays honest, no silent death).
     thread = threading.Thread(target=_serve_poll_loop, name="g2h-poller",
                               args=(cfg, ctx, key, args, dest_kind, holder,
                                     stop), daemon=True)

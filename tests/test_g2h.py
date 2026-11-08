@@ -1595,6 +1595,40 @@ class DashboardRelayCase(_Harness, unittest.TestCase):
         self.assertNotIn("nota-host.example", proc.stderr)
         self.assert_no_control_posts("invalid notify url")
 
+    def test_50_serve_mock_binds_before_first_status_read(self):
+        """The socket listens before the first gateway read completes.
+
+        A 12s delayed first status read would burn the 10s readiness
+        budget if the initial poll blocked before bind; the socket must
+        answer immediately, show the empty state, then catch up when the
+        delayed read lands.
+        """
+        self.start_mock(default_seq=["waiting_for_approval"])
+        proc = self.dispatch_scenario("SLOWB", "slow bind read run",
+                                      "--no-wait")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.status_reads(), [],
+                         "no-wait dispatch makes no status read")
+        self.mock.config.status_delay = 12.0
+        t0 = time.monotonic()
+        _proc, port = self.serve()
+        self.assertLess(time.monotonic() - t0, 8.0,
+                        "socket must listen before the first poll lands")
+        _status, _headers, html = self.http(port)
+        self.assertNotIn("slow bind read run", html,
+                         "first page shows the empty state; no read yet")
+        content = None
+        deadline = time.monotonic() + 14.0
+        while time.monotonic() < deadline:
+            _status, _headers, html = self.http(port)
+            if "slow bind read run" in html:
+                content = html
+                break
+            time.sleep(0.4)
+        self.assertIsNotNone(content,
+                             "the late snapshot must reach the page")
+        self.assert_no_control_posts("bind-before-first-read serve")
+
 
 def _free_loopback_port():
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
