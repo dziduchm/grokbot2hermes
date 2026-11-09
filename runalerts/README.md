@@ -1,6 +1,6 @@
 # G2C run-approvals chat alert sender (Marcin-only install)
 
-The Hermes multiplex gateway runs an env-gated, keyless emitter that watches the
+The Hermes multiplex gateway runs a config-gated, keyless emitter that watches the
 live run-approval and clarify cards (pre-mint, no credentials) and appends one
 redacted alert record per waiter (dedupe key `profile|run_id|prompt_id|generation`)
 to a local JSONL ledger. This sender is the only component with network access:
@@ -32,8 +32,8 @@ Safety rails (built in, none are configurable):
   key header is never replayed to a redirect target).
 - Closed records (a waiter settled or vanished) stay ledger-only by default.
   Enable the one-line, link-free chat follow-up with the `--notify-closed` flag
-  or `G2C_RUNALERTS_NOTIFY_CLOSED=1` (also accepts the gateway-side env name
-  `HERMES_WEBAPP_RUN_ALERTS_NOTIFY_CLOSED=1`).
+  or `G2C_RUNALERTS_NOTIFY_CLOSED=1` (sender side only; the gateway has no
+  switch for it).
 
 ## Files
 
@@ -45,30 +45,54 @@ Safety rails (built in, none are configurable):
 
 ## Step 1: configure the gateway side (on the machine that runs the gateway)
 
-The only env home is the gateway's launchd unit,
-`~/Library/LaunchAgents/ai.hermes.gateway.plist`: put these keys in its
-`EnvironmentVariables` dict (merge with existing entries). NEVER use `launchctl
-setenv`, shell profiles (`bashrc`, `zshrc`, `launchctl subset` included) or any
-other global mechanism: the alerts feature must only ever turn on inside that
-one gateway unit, which owns both production ports 8642 and 9120. "Restart" in
-this README always means kickstart that one unit, nothing else:
+The production gate is a `webapp.run_alerts` block in the gateway's `config.yaml`
+(the same file `webapp.public_url` comes from; the emitter reads it with the
+gateway's own in-process config loader, so the managed overlay and `${ENV}`
+expansion behave as usual). NEVER put these settings into
+`~/Library/LaunchAgents/ai.hermes.gateway.plist`: the gateway REGENERATES that
+file from scratch on every gateway start, restart and update pause/resume
+(`hermes_cli.gateway_launchd.refresh_launchd_plist_if_needed` compares it with a
+generated one and rewrites it), so `HERMES_WEBAPP_RUN_ALERTS_*` entries there
+would be silently wiped and the alerts would go dead, fail closed, on the next
+restart or `hermes update`. Never use `launchctl setenv` or shell profiles
+(`bashrc`, `zshrc`, `launchctl subset`) either: the emitter's switch belongs to
+exactly one file, the gateway's `config.yaml`. "Restart" always means kickstart
+that one gateway unit (it owns production ports 8642 and 9120):
 
     launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway
 
-- `HERMES_WEBAPP_RUN_ALERTS_OUTBOX` = absolute ledger path, e.g.
-  `/Users/md/.bfc-pipeline/run/g2c/alerts.jsonl` (`/Users/md/.bfc-pipeline/run/g2c`
-  must exist; the emitter tightens it to 0700).
-- `HERMES_WEBAPP_RUN_ALERTS_PROFILES` = comma-separated BARE served profile ids,
-  e.g. `coder,code-reviewer,imilk,researcher`. Bare ids only: values like
-  `profiles/main` are directory paths, not server ids, and would silently match
-  nothing (empty or unset means nothing alerts).
-- Optional: `HERMES_WEBAPP_RUN_ALERTS_INTERVAL` (seconds, default 30, minimum 5),
-  `HERMES_WEBAPP_RUN_ALERTS_PUBLIC_URL` (for deep links; falls back to the
-  webapp listener's `public_url`), `HERMES_WEBAPP_RUN_ALERTS_NOTIFY_CLOSED=1`
-  (closed chat follow-up, default off).
+Example block:
 
-ALL gateway env unset means fully off. The emitter does no network I/O and holds
-no credentials of any kind.
+    webapp:
+      run_alerts:
+        outbox: /Users/md/.bfc-pipeline/run/g2c/alerts.jsonl
+        profiles: [coder, code-reviewer, imilk, researcher]
+        interval: 30
+        public_url: https://md-mm.taild7b334.ts.net
+
+- `outbox` = absolute ledger path (required; `/Users/md/.bfc-pipeline/run/g2c`
+  must exist; the emitter tightens it to 0700).
+- `profiles` = BARE served profile ids, a yaml list or one comma string, e.g.
+  `[coder, code-reviewer, imilk, researcher]`. Bare ids only: values like
+  `profiles/main` are directory paths, not server ids, and would silently match
+  nothing (empty means nothing alerts).
+- `interval` = poll seconds, a positive number (default 30, minimum 5).
+- `public_url` = optional deep-link origin; when absent the emitter falls back
+  to the webapp listener's own `webapp.public_url`.
+
+Validation is strict and fail closed: no `webapp.run_alerts` block, or any
+malformed value (relative or blank `outbox`, non-string profile entries, empty
+profile list, non-number or non-positive `interval`, non-http(s)
+`public_url`), leaves the feature fully off with one log line in the gateway
+log. No block present is the plain default state (no log line noise).
+
+Env override, trials only: `HERMES_WEBAPP_RUN_ALERTS_OUTBOX`,
+`HERMES_WEBAPP_RUN_ALERTS_PROFILES` (comma string), the optional
+`HERMES_WEBAPP_RUN_ALERTS_INTERVAL` and `HERMES_WEBAPP_RUN_ALERTS_PUBLIC_URL`.
+Any ONE of them set wins entirely over the config block (that is how isolated
+trial homes turn this on without touching `config.yaml`; do NOT rely on it for
+production, see the plist warning above). With no env var and no config block
+the emitter is fully off; it does no network I/O and holds no credentials.
 
 ## Step 2: register the Grok Bot routine
 
@@ -93,8 +117,8 @@ Optional third key: `"key_header": "<header name>"` (default `X-Sender-Key`).
 ## Step 4: install the launchd timer
 
 Fill every `__PLACEHOLDER__` in `runalerts/com.md.g2c.runalerts-sender.plist`
-(python3 path, sender script path, ledger path - MUST equal
-`HERMES_WEBAPP_RUN_ALERTS_OUTBOX` from step 1 - and log path), then:
+(python3 path, sender script path, ledger path - MUST equal the config
+`outbox` from step 1 - and log path), then:
 
     cp runalerts/com.md.g2c.runalerts-sender.plist ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist
     launchctl load ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist
@@ -112,9 +136,9 @@ self-test (no `--ledger` argument exists on that path).
 
 - Stop the sender: `launchctl unload ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist`
   and delete the plist from `~/Library/LaunchAgents`.
-- Turn the emitter off: remove the `HERMES_WEBAPP_RUN_ALERTS_*` env entries from
-  `~/Library/LaunchAgents/ai.hermes.gateway.plist` EnvironmentVariables and
-  kickstart that one gateway unit (all unset = fully off).
+- Turn the emitter off: remove the `webapp.run_alerts` block from the gateway's
+  `config.yaml` and kickstart that one gateway unit (no env, no block = fully
+  off; the trial env vars are for isolated trial homes only).
 - The sidecar lock file next to the ledger (`<outbox>.lock`) carries no data; it
   can be deleted together with the ledger after stopping both processes (never
   while a sender or emitter tick can touch the ledger).
