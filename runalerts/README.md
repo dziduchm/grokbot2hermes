@@ -115,6 +115,9 @@ self-test (no `--ledger` argument exists on that path).
 - Turn the emitter off: remove the `HERMES_WEBAPP_RUN_ALERTS_*` env entries from
   `~/Library/LaunchAgents/ai.hermes.gateway.plist` EnvironmentVariables and
   kickstart that one gateway unit (all unset = fully off).
+- The sidecar lock file next to the ledger (`<outbox>.lock`) carries no data; it
+  can be deleted together with the ledger after stopping both processes (never
+  while a sender or emitter tick can touch the ledger).
 - Delete the webhook file (the routine stops being reachable from this sender).
 - The ledger is plain JSONL and can simply be deleted. `alerts.bad.jsonl` keeps
   any malformed lines for inspection.
