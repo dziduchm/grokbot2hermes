@@ -13,10 +13,15 @@ never touches the gateway or the DB. Stdlib only, Python 3.9+.
 
 Safety rails (built in, none are configurable):
 - POST payload is re-checked field by field against a strict allowlist; anything
-  unknown, misplaced or over the 3KB cap refuses the record (3 refusals then
-  `given_up`, same budget as a failing webhook).
+  unknown, misplaced or over the 3KB cap marks the record `given_up` on the FIRST
+  refusal (a broken record shape will not heal by retrying).
 - 3 failed attempts per key (10s timeout each), then the key is marked
   `given_up` permanently: no infinite retries, no chat spam.
+- Cross-process ledger lock (fcntl.flock on the sidecar file next to the ledger,
+  `*.lock` 0600 inside the 0700 ledger dir, shared with the gateway emitter): the
+  emitter takes it non-blocking for every append and closed rewrite, this sender
+  holds it for the whole load, mutate, rewrite tick with a bounded wait, then the
+  tick is skipped whole and retried on the next run.
 - Full-file atomic rewrite of the ledger (tmp + rename, file 0600, dir 0700);
   records older than 14 days are pruned on write, hard cap 5000 records.
 - Malformed ledger lines are skipped and quarantined once to
@@ -40,13 +45,23 @@ Safety rails (built in, none are configurable):
 
 ## Step 1: configure the gateway side (on the machine that runs the gateway)
 
-Add to the gateway service environment, then restart the webapp process:
+The only env home is the gateway's launchd unit,
+`~/Library/LaunchAgents/ai.hermes.gateway.plist`: put these keys in its
+`EnvironmentVariables` dict (merge with existing entries). NEVER use `launchctl
+setenv`, shell profiles (`bashrc`, `zshrc`, `launchctl subset` included) or any
+other global mechanism: the alerts feature must only ever turn on inside that
+one gateway unit, which owns both production ports 8642 and 9120. "Restart" in
+this README always means kickstart that one unit, nothing else:
+
+    launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway
 
 - `HERMES_WEBAPP_RUN_ALERTS_OUTBOX` = absolute ledger path, e.g.
   `/Users/md/.bfc-pipeline/run/g2c/alerts.jsonl` (`/Users/md/.bfc-pipeline/run/g2c`
   must exist; the emitter tightens it to 0700).
-- `HERMES_WEBAPP_RUN_ALERTS_PROFILES` = comma-separated served profile homes the
-  alerts may come from, e.g. `profiles/main` (empty or unset means nothing alerts).
+- `HERMES_WEBAPP_RUN_ALERTS_PROFILES` = comma-separated BARE served profile ids,
+  e.g. `coder,code-reviewer,imilk,researcher`. Bare ids only: values like
+  `profiles/main` are directory paths, not server ids, and would silently match
+  nothing (empty or unset means nothing alerts).
 - Optional: `HERMES_WEBAPP_RUN_ALERTS_INTERVAL` (seconds, default 30, minimum 5),
   `HERMES_WEBAPP_RUN_ALERTS_PUBLIC_URL` (for deep links; falls back to the
   webapp listener's `public_url`), `HERMES_WEBAPP_RUN_ALERTS_NOTIFY_CLOSED=1`
@@ -98,7 +113,8 @@ self-test (no `--ledger` argument exists on that path).
 - Stop the sender: `launchctl unload ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist`
   and delete the plist from `~/Library/LaunchAgents`.
 - Turn the emitter off: remove the `HERMES_WEBAPP_RUN_ALERTS_*` env entries from
-  the gateway service and restart the webapp process (all unset = fully off).
+  `~/Library/LaunchAgents/ai.hermes.gateway.plist` EnvironmentVariables and
+  kickstart that one gateway unit (all unset = fully off).
 - Delete the webhook file (the routine stops being reachable from this sender).
 - The ledger is plain JSONL and can simply be deleted. `alerts.bad.jsonl` keeps
   any malformed lines for inspection.
@@ -113,9 +129,15 @@ self-test (no `--ledger` argument exists on that path).
   `closed_gave_up_iso_utc`), so the state survives restarts and is auditable.
 - The sender is a second writer to the emitter ledger: the gateway appends
   single small JSONL lines, the sender rewrites the whole file only on change.
-  The accepted race window (no lock, per the frozen design) spans the
-  read-rename of one rewriting tick and at worst delays one record's first
-  delivery (the emitter's in-memory dedupe plus the closed-on-vanish flow
-  keeps the ledger eventually consistent).
+  Both sides serialize every mutation on the same fcntl.flock gate (sidecar
+  `*.lock` file, 0600, inside the 0700 ledger dir): the emitter non-blocking, so
+  a contended mutation is skipped with its dedupe state untouched and retried
+  next tick; the sender for its whole load, mutate, rewrite section with a
+  bounded wait. This closes both review races end to end: no sender rewrite can
+  swallow an emitter append, and no emitter closed rewrite can revert a sender
+  status mark.
+- "Restart" always means kickstarting the single gateway launchd unit
+  (`ai.hermes.gateway`, owner of ports 8642 and 9120), never any global env
+  mechanism (`launchctl setenv`, shell profiles).
 - Tests: `python3 -m unittest discover -s tests -v` (repo CI rules: ruff 0.15.8
   on `g2h.py` and `tests/`, em/en-dash byte scan, gitleaks).

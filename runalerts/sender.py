@@ -13,12 +13,23 @@ Ledger contract (mirrors the emitter):
   file 0600, dir 0700);
 - statuses: pending, sent, given_up, closed, superseded; only pending records are ever
   POSTed, and only the FIRST pending record per key (any later same-key pending record
-  is marked superseded - belt and braces against any future second writer);
+  is marked superseded - belt and braces against any future second writer). A key with a
+  closed or given_up record anywhere on the ledger is final, so a still-pending twin of
+  that key is marked superseded too and can never make the alert POST again;
 - failed POSTs increment the record bookkeeping field attempts; after MAX_ATTEMPTS the
   key is marked given_up permanently (no infinite retry, no spam);
+- allowlist refusals are permanent as well: the FIRST refusal marks the record given_up
+  (a record whose shape is broken will not heal by retrying);
 - records older than PRUNE_DAYS (14) are pruned on write; hard cap MAX_RECORDS (5000);
 - malformed lines are skipped on load and quarantined once to alerts.bad.jsonl next to
   the ledger.
+
+Cross-process locking: every run_once holds an fcntl.flock ledger gate, the sidecar file
+next to the ledger (ledger path + '.lock', created 0600 inside the 0700 ledger dir),
+shared with the gateway emitter, which takes the same gate non-blocking. The gate covers
+the whole load, mutate, rewrite section of the tick; the wait is bounded (LOCK_MAX_POLLS
+* LOCK_POLL_SECONDS) and a still-contended gate skips the tick whole, ledger untouched,
+next tick retries.
 
 The POST payload is re-checked field by field against a strict allowlist before any
 byte leaves: only the alert's page-visible redacted fields, never any token, digest,
@@ -30,12 +41,15 @@ Log lines are capped (LOG_LINE_CAP) and never contain the webhook url or sender 
 argv carries paths and flags only.
 """
 import argparse
+import contextlib
+import fcntl
 import json
 import logging
 import os
 import stat
 import sys
 import tempfile
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -60,6 +74,9 @@ KNOWN_STATUSES = frozenset((STATUS_PENDING, STATUS_SENT, STATUS_GIVEN_UP, STATUS
 
 LEDGER_DIR_MODE = 0o700
 LEDGER_FILE_MODE = 0o600
+LEDGER_LOCK_SUFFIX = ".lock"
+LOCK_POLL_SECONDS = 0.25
+LOCK_MAX_POLLS = 12  # bounded wait: about 3 seconds, then this tick is skipped
 
 DEFAULT_WEBHOOK_PATH = "/Users/md/.bfc-pipeline/secrets/g2c-grokbot-webhook.json"
 DEFAULT_KEY_HEADER = "X-Sender-Key"
@@ -359,6 +376,59 @@ def post_payload(webhook: Dict[str, str], payload: dict) -> int:
 # the run
 # ---------------------------------------------------------------------------
 
+def _zero_counts() -> dict:
+    """The all-zero counts dict, used when a tick does nothing (busy gate, missing webhook)."""
+    return {"posted": 0, "sent": 0, "given_up": 0, "superseded": 0,
+            "closed_sent": 0, "rewrote": False, "skipped": 0}
+
+
+@contextlib.contextmanager
+def ledger_gate(ledger, max_polls: int = LOCK_MAX_POLLS,
+                poll_seconds: float = LOCK_POLL_SECONDS):
+    """The cross-process ledger gate: fcntl.flock LOCK_EX on the sidecar file next to the
+    ledger (ledger path + '.lock', created 0600 inside the 0700 ledger dir), shared with
+    the gateway emitter, which takes the same gate non-blocking. The sender waits bounded
+    so a wedged holder cannot hang the launchd timer: when the wait expires the tick is
+    skipped whole (ledger untouched, next tick retries) and this yields False."""
+    gate = Path(str(ledger) + LEDGER_LOCK_SUFFIX)
+    try:
+        os.makedirs(str(gate.parent), exist_ok=True)
+        try:
+            os.chmod(str(gate.parent), LEDGER_DIR_MODE)
+        except OSError:
+            pass
+        fd = os.open(str(gate), os.O_RDWR | os.O_CREAT, LEDGER_FILE_MODE)
+    except OSError as exc:
+        log_event("sender: ledger gate unavailable, skipping this tick: "
+                  + type(exc).__name__)
+        yield False
+        return
+    acquired = False
+    try:
+        try:
+            os.fchmod(fd, LEDGER_FILE_MODE)
+        except OSError:
+            pass
+        for _ in range(max(1, int(max_polls))):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                time.sleep(max(0.01, float(poll_seconds)))
+            else:
+                acquired = True
+                break
+        if not acquired:
+            log_event("sender: ledger busy after the bounded wait, skipping this tick")
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(fd)
+
+
 def _mark(record: dict, status: str) -> bool:
     if record.get("status") == status:
         return False
@@ -367,24 +437,43 @@ def _mark(record: dict, status: str) -> bool:
 
 
 def run_once(ledger, webhook_path, notify_closed: bool = False,
-             now: Optional[datetime] = None) -> dict:
-    """One sender tick: load the webhook file (missing means clean exit, ledger
-    untouched), read the ledger, POST the first pending record per key, close the
-    books with one atomic rewrite when anything changed. Returns per-run counts."""
+             now: Optional[datetime] = None, max_polls: Optional[int] = None,
+             poll_seconds: Optional[float] = None) -> dict:
+    """One sender tick, entirely inside the ledger gate: load the webhook file (missing
+    means clean exit, ledger untouched, gate not even taken), read the ledger, POST the
+    first pending record per key, close the books with one atomic rewrite when anything
+    changed. A contended gate skips the tick whole with all-zero counts. Optional
+    max_polls/poll_seconds tune the bounded wait (used by tests)."""
     now = now or datetime.now(timezone.utc)
     ledger = Path(ledger)
     try:
         webhook = load_webhook(webhook_path)
     except AllowlistRefusal as exc:
         log_event("sender: webhook file not usable: " + str(exc))
-        return {"posted": 0, "sent": 0, "given_up": 0, "superseded": 0,
-                "closed_sent": 0, "rewrote": False, "skipped": 0}
+        return _zero_counts()
+    kwargs = {}
+    if max_polls is not None:
+        kwargs["max_polls"] = max_polls
+    if poll_seconds is not None:
+        kwargs["poll_seconds"] = poll_seconds
+    with ledger_gate(ledger, **kwargs) as locked:
+        if not locked:
+            return _zero_counts()
+        return _run_locked(ledger, webhook, notify_closed, now)
 
+
+def _run_locked(ledger: Path, webhook, notify_closed: bool, now: datetime) -> dict:
+    """The gated body of run_once: the caller holds the cross-process ledger gate for
+    this whole section (load, mutate, rewrite), so gateway appends cannot interleave
+    with status marks or the rewrite."""
     records, _bad = load_records(ledger)
     pre_count = len(records)
-    counts = {"posted": 0, "sent": 0, "given_up": 0, "superseded": 0,
-              "closed_sent": 0, "rewrote": False, "skipped": 0}
+    counts = _zero_counts()
     changed = False
+    # A key with a closed or given_up record anywhere on the ledger is final: no
+    # pending twin of that key may ever POST again (the vanished-key rule, never replayed).
+    dead_keys = {record.get("key") for record in records
+                 if record.get("status") in (STATUS_CLOSED, STATUS_GIVEN_UP)}
     chosen: List[dict] = []
     seen_keys = set()
     for record in records:
@@ -392,6 +481,12 @@ def run_once(ledger, webhook_path, notify_closed: bool = False,
             continue
         key = record.get("key")
         if not isinstance(key, str) or not key:
+            continue
+        if key in dead_keys:
+            if _mark(record, STATUS_SUPERSEDED):
+                counts["superseded"] += 1
+                changed = True
+                log_event("sender: superseded pending twin of a final key " + key)
             continue
         if key in seen_keys:
             if _mark(record, STATUS_SUPERSEDED):
@@ -407,15 +502,17 @@ def run_once(ledger, webhook_path, notify_closed: bool = False,
         try:
             payload = payload_from_record(record)
         except AllowlistRefusal as exc:
+            # A record that fails the allowlist is broken, not transiently unavailable:
+            # refuse once, mark given_up immediately, never POST it.
             attempts = record.get("attempts")
             attempts = attempts + 1 if type(attempts) is int else 1
             record["attempts"] = attempts
             changed = True
             counts["skipped"] += 1
-            if attempts >= MAX_ATTEMPTS and _mark(record, STATUS_GIVEN_UP):
+            if _mark(record, STATUS_GIVEN_UP):
                 counts["given_up"] += 1
-            log_event("sender: refused record for key " + key + ": " + str(exc)
-                      + " (attempt " + str(attempts) + ")")
+            log_event("sender: refused record for key " + key + ", given_up permanently: "
+                      + str(exc))
             continue
         counts["posted"] += 1
         try:

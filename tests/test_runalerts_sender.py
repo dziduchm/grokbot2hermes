@@ -73,7 +73,8 @@ def closed_record(**overrides) -> Dict:
 class CaptureServer:
     """Loopback POST capture: configurable status, records every request."""
 
-    def __init__(self, status: int = 200, body: bytes = b"{}"):
+    def __init__(self, status: int = 200, body: bytes = b"{}",
+                 location: Optional[str] = None):
         holder = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -86,6 +87,12 @@ class CaptureServer:
                     "key": self.headers.get("X-Sender-Key"),
                     "content_type": self.headers.get("Content-Type"),
                 })
+                if holder.location is not None:
+                    self.send_response(holder.status)
+                    self.send_header("Location", holder.location)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if holder.status >= 300:
                     self.send_error(holder.status)
                     return
@@ -100,6 +107,7 @@ class CaptureServer:
 
         self.status = status
         self.body = body
+        self.location = location
         self.requests: List[dict] = []
         self.httpd = HTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -254,22 +262,23 @@ class SenderCase(unittest.TestCase):
         self.assertEqual(open(self.ledger, encoding="utf-8").read(), before)
         self.assertTrue(any("webhook file not usable" in line for line in self.logs))
 
-    def test_forbidden_field_refused_until_given_up(self):
+    def test_forbidden_field_given_up_on_first_refusal(self):
         record = approval_record(action_digest="d" * 64)  # never allowlisted
         self.write_ledger([record])
         server = CaptureServer()
         try:
             webhook = self.webhook_file(server)
             counts = sender.run_once(self.ledger, webhook, now=self.now())
-            self.assertEqual(len(server.requests), 0)
-            self.assertEqual(counts["skipped"], 1)
-            for _ in range(2):
-                sender.run_once(self.ledger, webhook, now=self.now())
+            second = sender.run_once(self.ledger, webhook, now=self.now())
         finally:
             server.stop()
+        self.assertEqual(len(server.requests), 0)  # broken shape: nothing ever POSTs
+        self.assertEqual(counts["skipped"], 1)
+        self.assertEqual(counts["given_up"], 1)
+        self.assertEqual(second["posted"], 0)  # permanent: no retry, no POST
         stored = self.ledger_records()
-        self.assertEqual(stored[0]["status"], "given_up")
-        self.assertEqual(stored[0]["attempts"], 3)
+        self.assertEqual(stored[0]["status"], "given_up")  # permanent at the FIRST refusal
+        self.assertEqual(stored[0]["attempts"], 1)
 
     def test_unknown_kind_and_bad_v_refused(self):
         bad_records = [approval_record(kind="weird"),
@@ -283,6 +292,66 @@ class SenderCase(unittest.TestCase):
             server.stop()
         self.assertEqual(counts["skipped"], 2)
         self.assertEqual(len(server.requests), 0)
+
+    def test_pending_twin_of_final_key_never_replays(self):
+        self.write_ledger([approval_record(), closed_record()])
+        server = CaptureServer()
+        try:
+            counts = sender.run_once(self.ledger, self.webhook_file(server),
+                                     now=self.now())
+        finally:
+            server.stop()
+        self.assertEqual(len(server.requests), 0)  # the vanished-key rule: never replayed
+        self.assertEqual(counts["sent"], 0)
+        self.assertEqual(counts["superseded"], 1)
+        stored = self.ledger_records()
+        self.assertEqual([r["status"] for r in stored], ["superseded", "closed"])
+
+    def test_busy_ledger_gate_skips_whole_tick(self):
+        import fcntl
+
+        self.write_ledger([approval_record()])
+        before = open(self.ledger, encoding="utf-8").read()
+        gate = sender.Path(str(self.ledger) + sender.LEDGER_LOCK_SUFFIX)
+        fd = os.open(str(gate), os.O_RDWR | os.O_CREAT, sender.LEDGER_FILE_MODE)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # another writer holds it
+            counts = sender.run_once(self.ledger,
+                                     self.webhook_file(url="https://127.0.0.1:9/hook"),
+                                     now=self.now(), max_polls=2, poll_seconds=0.02)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        self.assertEqual(counts, sender._zero_counts())
+        self.assertEqual(open(self.ledger, encoding="utf-8").read(), before)
+        self.assertTrue(any("ledger busy" in line for line in self.logs))
+        server = CaptureServer()
+        try:
+            counts = sender.run_once(self.ledger, self.webhook_file(server),
+                                     now=self.now())
+        finally:
+            server.stop()
+        self.assertEqual(counts["sent"], 1)  # the skipped key is served on the next run
+
+    def test_302_redirect_fails_and_is_never_replayed(self):
+        self.write_ledger([approval_record()])
+        target = CaptureServer()  # the Location target: must NEVER be touched
+        redirector = CaptureServer(status=302, location=target.url())
+        try:
+            counts = sender.run_once(self.ledger, self.webhook_file(redirector),
+                                     now=self.now())
+        finally:
+            redirector.stop()
+            target.stop()
+        self.assertEqual(len(redirector.requests), 1)  # the original url's 302
+        self.assertEqual(redirector.requests[0]["key"], DUMMY_KEY)
+        self.assertEqual(len(target.requests), 0)  # never replayed to the Location
+        self.assertEqual(counts["posted"], 1)
+        self.assertEqual(counts["sent"], 0)
+        self.assertEqual(counts["given_up"], 0)
+        stored = self.ledger_records()
+        self.assertEqual(stored[0]["status"], "pending")  # a redirect is a mere failure
+        self.assertEqual(stored[0]["attempts"], 1)
 
     def test_closed_chat_delivery_default_off_then_enabled_once(self):
         records = [approval_record(status="sent"),
