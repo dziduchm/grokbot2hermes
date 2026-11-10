@@ -37,6 +37,15 @@ the whole load, mutate, rewrite section of the tick; the wait is bounded (LOCK_M
 next tick retries. POSIX uses fcntl.flock, Windows msvcrt.locking; with neither
 primitive (third platforms) the gate fails closed: the tick is skipped with one line.
 
+Multi-tick invocations: main() can run run_once several times inside one
+process (--ticks N, default 1; --tick-interval SECONDS between ticks, default
+15, used only when ticks > 1). The Windows installer relies on this: Task
+Scheduler rejects any sub-minute repetition interval, so the Windows task
+repeats every 1 minute and each invocation performs four ticks 15 seconds
+apart inside the minute, while macOS launchd keeps its one-tick 15-second
+timer. Every tick keeps the gate rules: a busy gate no-ops that tick and
+later ticks retry, and invalid flag combinations refuse before any POST.
+
 The POST payload is re-checked field by field against a strict allowlist before any
 byte leaves: only the alert's page-visible redacted fields, never any token, digest,
 bookkeeping or secret material, and never a link for a closed record. Closed records
@@ -117,6 +126,14 @@ LEDGER_FILE_MODE = 0o600
 LEDGER_LOCK_SUFFIX = ".lock"
 LOCK_POLL_SECONDS = 0.25
 LOCK_MAX_POLLS = 12  # bounded wait: about 3 seconds, then this tick is skipped
+
+# Multi-tick invocations (--ticks / --tick-interval): the Task Scheduler
+# repetition on Windows is one minute (sub-minute repetition intervals are
+# rejected there), so its invocation runs 4 ticks 15 seconds apart inside that
+# minute; macOS launchd and a bare CLI call keep the default single tick.
+DEFAULT_TICKS = 1
+DEFAULT_TICK_INTERVAL_S = 15.0
+TICK_WINDOW_S = 60  # the whole multi-tick run must finish inside one minute
 
 DEFAULT_WEBHOOK_PATH = "/Users/md/.bfc-pipeline/secrets/g2c-grokbot-webhook.json"
 DEFAULT_KEY_HEADER = "X-Sender-Key"
@@ -931,6 +948,50 @@ def closed_payload_from_record(record: dict) -> dict:
     return payload
 
 
+# ---------------------------------------------------------------------------
+# multi-tick runs (Windows: four ticks inside the one-minute task)
+# ---------------------------------------------------------------------------
+
+def _validate_ticks(ticks, tick_interval) -> Optional[str]:
+    """The CLI boundary check for the multi-tick flags: the refusal line, or
+    None when both are usable. Fail closed: the caller must not POST a single
+    byte on any refusal (no tick, no self-test)."""
+    if type(ticks) is not int or ticks < 1:
+        return "--ticks must be a whole number of 1 or more (got %r)" % (ticks,)
+    if type(tick_interval) not in (int, float) or tick_interval < 0:
+        return ("--tick-interval must be a non-negative number of seconds "
+                "(got %r)" % (tick_interval,))
+    if ticks > 1 and (ticks - 1) * tick_interval >= TICK_WINDOW_S:
+        return ("--ticks %d at --tick-interval %s only starts the last tick "
+                "at %s seconds: the whole run must finish inside one scheduled "
+                "minute (%d)" % (ticks, tick_interval,
+                                 (ticks - 1) * tick_interval, TICK_WINDOW_S))
+    return None
+
+
+def run_ticks(ledger, webhook_path, notify_closed: bool = False,
+              ticks: int = DEFAULT_TICKS,
+              tick_interval: float = DEFAULT_TICK_INTERVAL_S,
+              sleep_fn=None) -> List[dict]:
+    """Run run_once *ticks* times inside one process, sleeping *tick_interval*
+    seconds between ticks (never before the first or after the last). Every
+    tick is a full run_once behind the ledger gate, so a busy gate no-ops that
+    tick with all-zero counts while later ticks retry: multi-tick runs stay
+    single-instance safe. The defaults are one call and no sleep, which keeps
+    macOS launchd and a bare CLI call exactly as before; the Windows installer
+    passes 4 ticks 15 seconds apart. Callers validate their flags
+    (_validate_ticks); sleep_fn is late-bound (None means time.sleep at call
+    time, so tests patch sender.time.sleep) and tests pass a stub, so nothing
+    in the suite sleeps in real time."""
+    if sleep_fn is None:
+        sleep_fn = time.sleep
+    results = [run_once(ledger, webhook_path, notify_closed=notify_closed)]
+    for _rest in range(ticks - 1):
+        sleep_fn(tick_interval)
+        results.append(run_once(ledger, webhook_path, notify_closed=notify_closed))
+    return results
+
+
 def self_test(webhook_path) -> int:
     """Marcin's wiring check: POST the fixed self-test message and nothing else. The
     ledger is never touched because no ledger argument exists on this path."""
@@ -989,6 +1050,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "or an owner-only ACL on creation, best-effort like "
                              "the ledger files; used by the Windows Task Scheduler "
                              "task); never logs the key")
+    parser.add_argument("--ticks", type=int, default=DEFAULT_TICKS,
+                        help="ticks to run in this invocation (default 1; the "
+                             "Windows 1-minute Task Scheduler task uses 4)")
+    parser.add_argument("--tick-interval", type=float,
+                        default=DEFAULT_TICK_INTERVAL_S,
+                        help="seconds between ticks when --ticks is above 1 "
+                             "(default 15)")
     args = parser.parse_args(argv)
     if not _has_stream_handler(_log):
         handler = logging.StreamHandler(sys.stderr)
@@ -1007,7 +1075,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             file_handler.setFormatter(
                 logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
             _log.addHandler(file_handler)
+    refusal = _validate_ticks(args.ticks, args.tick_interval)
+    if refusal:
+        log_event("sender: refused flags: " + refusal)
+        return 2
     if args.self_test:
+        if args.ticks != DEFAULT_TICKS:
+            log_event("sender: --self-test posts exactly one fixed message and "
+                      "never enters the multi-tick loop: drop --ticks (or leave "
+                      "it at 1)")
+            return 2
         return self_test(args.webhook)
     ledger = args.ledger or os.environ.get("G2C_RUNALERTS_LEDGER") \
         or os.environ.get("HERMES_WEBAPP_RUN_ALERTS_OUTBOX")
@@ -1015,7 +1092,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         log_event("sender: no ledger given (use --ledger or the env)")
         return 0
     notify_closed = _notify_closed_from_env(args.notify_closed)
-    run_once(ledger, args.webhook, notify_closed=notify_closed)
+    run_ticks(ledger, args.webhook, notify_closed=notify_closed,
+              ticks=args.ticks, tick_interval=args.tick_interval)
     return 0
 
 

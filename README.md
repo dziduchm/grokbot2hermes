@@ -254,7 +254,10 @@ config.yaml). The emitter (keyless, inside the gateway) watches the live
 run-approval and clarify cards before any token minting and appends one
 redacted record per waiter to a local JSONL ledger (0700 dir, 0600 file);
 this sender is the only component with network access: it POSTs the first
-pending record per key to a Grok Bot routine webhook every 15 seconds. It
+pending record per key to a Grok Bot routine webhook about every 15 seconds
+(one macOS launchd tick per 15-second timer; on Windows, a 1-minute Task
+Scheduler task runs four ticks 15 seconds apart, since Task Scheduler will not
+accept a sub-minute repetition interval). It
 holds ONLY the webhook url and sender key from an owner-only file, never any
 Hermes key, cookie or signing key, and never touches the gateway or the DB.
 

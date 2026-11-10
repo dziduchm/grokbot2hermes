@@ -27,6 +27,22 @@ Added:
   normalizes onto the header name plus bare token; a key with interior
   whitespace or a malformed header name refuses with an explanatory line
   naming the field and rule. The key value is never logged, never on argv.
+- Windows cadence fix: Task Scheduler rejects sub-minute repetition
+  intervals (PT15S: the minimum repetition is PT1M), so
+  `install-task-windows.ps1` now registers the per-user task with a
+  1-minute repetition, a 55-second execution time limit and
+  MultipleInstances IgnoreNew (a stuck run is stopped before the next
+  minute and never overlaps the next firing), and the registered command
+  adds the new sender multi-tick flags `--ticks 4 --tick-interval 15`:
+  four ticks 15 seconds apart inside that minute, the same effective
+  latency as macOS launchd's 15-second timer (which stays unchanged, one
+  tick per firing). Defaults stay one single tick per invocation, so a
+  plain CLI run is unchanged too; invalid combinations (a tick count
+  under 1, negative values, non-integer `--ticks` from argparse, a
+  self-test combined with ticks, or any spread that cannot finish inside
+  one minute) refuse fail closed BEFORE any POST or self-test call. A
+  static unit test now fails any sub-minute `-RepetitionInterval` in the
+  installer template.
 - Sanitization trigger hardening: markdown link neutering catches
   `]( https://...` with uppercase and interior spaces too (case insensitive,
   whitespace tolerant), not only the lowercase `](http` substring; plain

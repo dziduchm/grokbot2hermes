@@ -4,8 +4,11 @@ The Hermes multiplex gateway runs a config-gated, keyless emitter that watches t
 live run-approval and clarify cards (pre-mint, no credentials) and appends one
 redacted alert record per waiter (dedupe key `profile|run_id|prompt_id|generation`)
 to a local JSONL ledger. This sender is the only component with network access:
-every 15 seconds it takes the first pending record per key and POSTs it to a Grok
-Bot routine webhook.
+about every 15 seconds it takes the first pending record per key and POSTs it to a Grok
+Bot routine webhook. macOS launchd fires one tick per 15-second timer. Windows checks
+about every 15 seconds too, but Task Scheduler will not accept a sub-minute repetition
+interval, so the Windows installer registers a 1-minute task whose invocation performs
+four ticks 15 seconds apart (`--ticks 4 --tick-interval 15`).
 
 What the sender holds: ONLY the webhook url and sender key, read from a 0600 JSON
 file. It never imports or reads any Hermes API key, cookie or signing key, and it
@@ -50,7 +53,7 @@ Safety rails (built in, none are configurable):
 
 | File | Purpose |
 | --- | --- |
-| `runalerts/sender.py` | the sender process (`--self-test`, `--ledger`, `--webhook`, `--notify-closed`) |
+| `runalerts/sender.py` | the stdlib sender: gate, per-key POST, self-test, multi-tick loop (`--self-test`, `--ledger`, `--webhook`, `--notify-closed`, `--ticks`, `--tick-interval`) |
 | `runalerts/com.md.g2c.runalerts-sender.plist` | macOS launchd timer template (paths only, no secrets) |
 | `runalerts/install-task-windows.ps1` | Windows Task Scheduler installer template (edit two placeholder paths, review, run) |
 | `tests/test_runalerts_sender.py` | sender test suite (unittest, loopback mock) |
@@ -182,6 +185,16 @@ regular (non-admin) PowerShell window in the repo checkout:
     powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1
 
 Remove: `powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -Uninstall`
+
+How the cadence works on Windows: the task trigger repeats every 1 minute
+(Task Scheduler rejects any sub-minute repetition interval, such as a
+15-second PT15S), and the registered command adds `--ticks 4 --tick-interval
+15`, so one invocation performs four sender ticks 15 seconds apart inside
+that minute - the same effective latency as the 15-second launchd timer. The
+invocation's execution time limit is 55 seconds and MultipleInstances is
+IgnoreNew, so a stuck run is stopped before the next minute and can never
+overlap the next firing. Each tick is the same idempotent, ledger-gated tick
+as on the other platforms.
 
 ## Step 5: validate with the self-test
 

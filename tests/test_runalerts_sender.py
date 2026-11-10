@@ -11,6 +11,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -221,8 +222,16 @@ class SenderCase(unittest.TestCase):
         self.assertEqual([r["status"] for r in stored],
                          ["sent", "superseded", "sent", "sent"])
         self.assertNotIn("attempts", stored[0])  # no failed tries: no counter
-        self.assertEqual(stat.S_IMODE(os.stat(self.ledger).st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(os.stat(self.workdir).st_mode), 0o700)
+        if os.name == "nt":
+            # Windows asserts the privacy RESULT, never POSIX bits: the icacls
+            # tighten must leave the ledger owner-only. The required outcome is
+            # a clear False: True (world readable) or None (inconclusive)
+            # would both be a fail-closed refusal in the sender, so neither
+            # may count as this test's expected rewrite outcome.
+            self.assertIs(sender.world_readable(self.ledger), False)
+        else:
+            self.assertEqual(stat.S_IMODE(os.stat(self.ledger).st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(os.stat(self.workdir).st_mode), 0o700)
 
     def test_sent_records_not_reposted_on_second_run(self):
         self.write_ledger([approval_record()])
@@ -535,6 +544,128 @@ class SenderCase(unittest.TestCase):
         code = sender.main([])
         self.assertEqual(code, 0)
         self.assertTrue(any("no ledger given" in line for line in self.logs))
+
+    # --- multi-tick runs: --ticks / --tick-interval (Windows 1-minute task) -----
+
+    def test_run_ticks_runs_four_ticks_sleeping_between_only(self):
+        # Four ticks call run_once four times; the sleep runs exactly three
+        # times, after every tick but the last; run_ticks never sleeps first.
+        events = []
+        fake_ledger = "ledger.jsonl"
+        fake_webhook = "hook.json"
+
+        def fake_tick(ledger, webhook_path, **kwargs):
+            self.assertEqual(ledger, fake_ledger)
+            self.assertEqual(webhook_path, fake_webhook)
+            events.append("tick")
+            return sender._zero_counts()
+
+        with mock.patch.object(sender, "run_once", side_effect=fake_tick):
+            results = sender.run_ticks(
+                fake_ledger, fake_webhook, ticks=4, tick_interval=0.01,
+                sleep_fn=lambda seconds: events.append(("sleep", seconds)))
+        self.assertEqual(
+            events,
+            ["tick", ("sleep", 0.01), "tick", ("sleep", 0.01), "tick",
+             ("sleep", 0.01), "tick"])
+        self.assertEqual(len(results), 4)
+
+    def test_run_ticks_default_stays_one_tick_without_sleep(self):
+        # A bare CLI call (and macOS launchd) exercise exactly one run_once and
+        # never sleep: the default invocation is unchanged.
+        events = []
+        with mock.patch.object(
+                sender, "run_once",
+                side_effect=lambda *args, **kwargs: sender._zero_counts()):
+            sender.run_ticks("ledger.jsonl", "hook.json",
+                             sleep_fn=lambda seconds: events.append(seconds))
+        self.assertEqual(events, [])  # tick happened, zero sleeps
+
+    def test_main_four_ticks_match_the_windows_install(self):
+        # The exact shape the installer registers: --ticks 4 with the default
+        # interval, every tick a full run_once. Timing is stubbed, so the test
+        # never waits the 45 real seconds of the 3 in-loop sleeps.
+        calls, sleeps = [], []
+
+        def fake_tick(*args, **kwargs):
+            calls.append(1)
+            return sender._zero_counts()
+
+        with mock.patch.object(sender, "run_once", side_effect=fake_tick), \
+                mock.patch.object(sender.time, "sleep",
+                                  side_effect=lambda seconds: sleeps.append(seconds)):
+            code = sender.main(["--ledger", self.ledger, "--ticks", "4"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(sleeps, [sender.DEFAULT_TICK_INTERVAL_S,
+                                  sender.DEFAULT_TICK_INTERVAL_S,
+                                  sender.DEFAULT_TICK_INTERVAL_S])
+
+    def test_main_default_still_one_tick_through_run_ticks(self):
+        # Without the new flags, main passes ticks=1 and the default interval
+        # straight through: one POST, like before the flags existed.
+        self.write_ledger([approval_record()])
+        server = CaptureServer()
+        try:
+            with mock.patch.object(sender, "run_ticks",
+                                   wraps=sender.run_ticks) as fake:
+                code = sender.main(["--ledger", self.ledger,
+                                    "--webhook", self.webhook_file(server)])
+            self.assertEqual(code, 0)
+            kwargs = fake.call_args.kwargs
+        finally:
+            server.stop()
+        self.assertEqual(kwargs["ticks"], 1)
+        self.assertEqual(kwargs["tick_interval"], sender.DEFAULT_TICK_INTERVAL_S)
+        self.assertEqual(len(server.requests), 1)
+
+    def test_main_refuses_invalid_multitick_flags_before_any_tick(self):
+        # Fail closed: every invalid combination refuses BEFORE the first
+        # tick, so run_once/mock-POSTing never happens and no tick sleeps.
+        cases = [
+            ["--ticks", "0"],
+            ["--ticks", "-2"],
+            ["--tick-interval", "-1"],
+            ["--ticks", "1", "--tick-interval", "-0.5"],
+            # 5 ticks 15 s apart: (5 - 1) * 15 = 60, not under a minute
+            ["--ticks", "5", "--tick-interval", "15"],
+            ["--ticks", "9", "--tick-interval", "30"],
+        ]
+        with mock.patch.object(sender, "run_once") as fake_tick, \
+                mock.patch.object(sender.time, "sleep") as fake_sleep:
+            for argv in cases:
+                code = sender.main(["--ledger", self.ledger] + argv)
+                self.assertEqual(code, 2)
+        self.assertEqual(fake_tick.call_count, 0)  # no tick, so no POST at all
+        self.assertEqual(fake_sleep.call_count, 0)
+        self.assertTrue(any("refused flags" in line for line in self.logs))
+
+    def test_main_refuses_non_integer_tick_values(self):
+        # argparse refuses non-integer --ticks before main() sees a number.
+        with mock.patch.object(sender, "run_once") as fake_tick:
+            for value in ("2.5", "four", "1e2"):
+                with self.assertRaises(SystemExit):
+                    sender.main(["--ledger", self.ledger, "--ticks", value])
+        self.assertEqual(fake_tick.call_count, 0)
+
+    def test_self_test_never_enters_the_multitick_loop(self):
+        # --self-test with --ticks 4 refuses before any POST; --self-test with
+        # the default one tick is unchanged and posts its single fixed call.
+        server = CaptureServer()
+        try:
+            with mock.patch.object(sender, "post_payload") as fake_post:
+                code = sender.main(["--self-test", "--ticks", "4",
+                                    "--webhook", "flag-refused-unused.json"])
+                self.assertEqual(code, 2)
+                self.assertEqual(fake_post.call_count, 0)
+                self.assertTrue(any("--self-test" in line and "multi-tick" in line
+                                    for line in self.logs))
+            code_single = sender.main(["--self-test", "--ticks", "1",
+                                       "--webhook", self.webhook_file(server)])
+            self.assertEqual(code_single, 0)
+        finally:
+            server.stop()
+        self.assertEqual(len(server.requests), 1)  # the plain self-test call
 
     # --- Fix 1: payload sanitizing and the instruction preamble -----------------
 
@@ -922,6 +1053,59 @@ class SenderCase(unittest.TestCase):
         else:
             self.assertEqual(sender.default_webhook_path(),
                              sender.DEFAULT_WEBHOOK_PATH)
+
+
+class InstallerTaskDefinitionTest(unittest.TestCase):
+    """Static check of the checked-in Windows installer template: the Task
+    Scheduler repetition must stay exactly one minute (Task Scheduler rejects
+    any sub-minute repetition interval, and the 15-second cadence belongs to
+    the sender's own --tick-interval, which the interval scan never sees), and
+    the registered action must carry the multi-tick flags. Pure file reads:
+    nothing registers, nothing runs."""
+
+    @staticmethod
+    def installer_text() -> str:
+        path = os.path.join(REPO_ROOT, "runalerts", "install-task-windows.ps1")
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_repetition_interval_is_one_minute_never_sub_minute(self):
+        lines = self.installer_text().splitlines()
+        intervals = []
+        for line in lines:
+            if "-RepetitionInterval" not in line:
+                continue
+            match = re.search(
+                r"-RepetitionInterval\s+(\([^)]*\)|\"[^\"]*\"|'[^']*'|\S+)",
+                line)
+            assert match is not None, "unparsable RepetitionInterval: %r" % line
+            intervals.append(match.group(1))
+        self.assertTrue(intervals,
+                        "missing -RepetitionInterval in the installer template")
+        for interval in intervals:
+            lowered = interval.strip().lower()
+            # Sub-minute shapes fail explicitly: a -Seconds or -Milliseconds or
+            # -Ticks timespan, a fractional -Minutes value, or any ISO duration
+            # whose component granularity drops below a whole single minute.
+            self.assertFalse(
+                re.search(r"-seconds\s+\d+|-milliseconds|-ticks\b|"
+                          r"-minutes\s+0|pt\d+m\d|pt\d+[hs]", lowered),
+                "sub-minute Task Scheduler repetition interval: %r" % interval)
+            self.assertIn(
+                lowered,
+                ("(new-timespan -minutes 1)", "pt1m", "'pt1m'", '"pt1m"'),
+                "the task repetition must be exactly one minute, got %r"
+                % interval)
+
+    def test_action_carries_the_multitick_flags(self):
+        lines = self.installer_text().splitlines()
+        arg_index = [i for i, line in enumerate(lines) if "-Argument" in line]
+        self.assertEqual(len(arg_index), 1,
+                         "the installer must set exactly one action argument")
+        window = " ".join(lines[arg_index[0]:arg_index[0] + 3])
+        self.assertIn("--ticks 4", window)
+        self.assertIn("--tick-interval 15", window)
+        self.assertIn("--log-file", window)  # stdout is never collected
 
 
 if __name__ == "__main__":
