@@ -22,8 +22,8 @@ jobs:
           python-version: "3.12"
       - name: Install pinned ruff (development-only linter)
         run: python -m pip install "ruff==0.15.8"
-      - name: Lint client and tests (rules E, F, W)
-        run: ruff check g2h.py tests/
+      - name: Lint client, sender and tests (rules E, F, W)
+        run: ruff check g2h.py runalerts/ tests/
 
   test:
     strategy:
@@ -39,6 +39,10 @@ jobs:
           - os: macos-latest
             python-version: "3.9"
           - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.9"
+          - os: windows-latest
             python-version: "3.12"
     runs-on: ${{ matrix.os }}
     steps:

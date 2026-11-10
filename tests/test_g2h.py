@@ -36,6 +36,16 @@ sys.path.insert(0, TESTS_DIR)
 import mock_hermes  # noqa: E402
 from mock_hermes import MockHermes  # noqa: E402
 
+# The g2h client suite asserts POSIX file modes (0600/0700), checks symlinks
+# unconditionally and launches ./g2h as a POSIX script: skip the whole module
+# on Windows instead of weakening the assertions. The cross-platform coverage
+# in this repository lives in tests/test_runalerts_sender.py, which gates
+# platform-specific behavior by os.name.
+if os.name != "posix":
+    raise unittest.SkipTest(
+        "g2h client suite is POSIX-only (chmod modes, symlinks); "
+        "tests.test_runalerts_sender is the cross-platform suite")
+
 G2H_PY = os.path.join(REPO_ROOT, "g2h.py")
 
 LEDGER_NAME = "approvals.json"

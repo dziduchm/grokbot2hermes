@@ -2,6 +2,10 @@
 
 Dispatch tasks from Grok Bot to Hermes Agent. Not a migration tool.
 
+[![ci](https://github.com/dziduchm/grokbot2hermes/actions/workflows/ci.yml/badge.svg)](https://github.com/dziduchm/grokbot2hermes/actions/workflows/ci.yml)
+[![python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 ![Unofficial integration: a chat bubble dispatches task cards across a bridge toward the Hermes Agent logo.](docs/assets/hero.jpg)
 
 > GrokBot2Hermes is an independent, unofficial tool. It is not affiliated
@@ -36,7 +40,7 @@ unimplemented ideas are deliberately not drawn.
 
 ## Requirements
 
-- Python 3.9+ on macOS or Linux.
+- Python 3.9+ on macOS, Linux or Windows.
 - A Hermes Agent gateway with the API server enabled and `API_SERVER_KEY`
   set (the gateway is what runs the agent; see the upstream Hermes Agent
   repository: https://github.com/NousResearch/hermes-agent).
@@ -46,10 +50,13 @@ unimplemented ideas are deliberately not drawn.
 ```console
 $ git clone https://github.com/dziduchm/grokbot2hermes
 $ cd grokbot2hermes
-$ chmod +x g2h
+$ chmod +x g2h          # macOS and Linux (Windows calls python3 g2h.py directly)
 ```
 
-No pip install, no dependencies beyond the standard library.
+No pip install, no dependencies beyond the standard library. The
+run-approvals chat alert sender (`runalerts/`) is the piece hardened for all
+three platforms (advisory ledger lock per OS, owner-only files, cron, launchd
+and Task Scheduler recipes in its README).
 
 ## Quickstart
 
@@ -238,6 +245,32 @@ sessions); whether an existing g2h API run can attach to those surfaces
 is not verified, so this example does not promise it. See
 `docs/adapters/grokbot.md` and the security notes for the full
 boundaries before wiring anything.
+
+## Run-approvals chat alert sender (opt-in, separate process)
+
+`runalerts/` is a small, config-gated companion for a Hermes gateway that
+runs the chat alerts emitter (`webapp.run_alerts` block in the gateway's
+config.yaml). The emitter (keyless, inside the gateway) watches the live
+run-approval and clarify cards before any token minting and appends one
+redacted record per waiter to a local JSONL ledger (0700 dir, 0600 file);
+this sender is the only component with network access: it POSTs the first
+pending record per key to a Grok Bot routine webhook every 15 seconds. It
+holds ONLY the webhook url and sender key from an owner-only file, never any
+Hermes key, cookie or signing key, and never touches the gateway or the DB.
+
+Full install (three OS options), webhook file format, and rollback:
+[runalerts/README.md](runalerts/README.md).
+
+Security model in one paragraph: human-only settlement (Marcin answers on
+the phone page himself; nothing in this path can approve, deny or resolve a
+waiter and nothing in it holds a credential that could), webhook fail-closed
+(https required outside loopback, redirects count as failures so the key is
+never replayed to a redirect target, world-readable credential files are
+refused), sender-side sanitization with a fixed instruction preamble (agent
+free text is truncated, control characters stripped and markdown syntax
+defanged before it reaches chat), a suppression budget on the emitter side
+(one summary record per window, no storms), and it all rides the tailnet's
+Tailscale Serve origin, never the public internet.
 
 ## Run the tests
 

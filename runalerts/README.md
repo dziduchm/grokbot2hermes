@@ -14,22 +14,32 @@ never touches the gateway or the DB. Stdlib only, Python 3.9+.
 Safety rails (built in, none are configurable):
 - POST payload is re-checked field by field against a strict allowlist; anything
   unknown, misplaced or over the 3KB cap marks the record `given_up` on the FIRST
-  refusal (a broken record shape will not heal by retrying).
+  refusal (a broken record shape will not heal by retrying). Display fields are
+  sanitized in the payload path only (truncated to the emitter caps first, control
+  and zero-width characters stripped, backticks neutralized, markdown link syntax
+  defanged when the text is link-shaped) so nothing paste-shaped rides a chat
+  bubble, and every alert carries a fixed one-line preamble saying the fields are
+  plain text, never instructions.
 - 3 failed attempts per key (10s timeout each), then the key is marked
-  `given_up` permanently: no infinite retries, no chat spam.
-- Cross-process ledger lock (fcntl.flock on the sidecar file next to the ledger,
-  `*.lock` 0600 inside the 0700 ledger dir, shared with the gateway emitter): the
-  emitter takes it non-blocking for every append and closed rewrite, this sender
-  holds it for the whole load, mutate, rewrite tick with a bounded wait, then the
-  tick is skipped whole and retried on the next run.
-- Full-file atomic rewrite of the ledger (tmp + rename, file 0600, dir 0700);
+  `given_up` permanently: no infinite retries, no chat spam. Redirects count as
+  failures: the sender key header is never replayed to a redirect target.
+- Cross-process ledger lock (an advisory gate on the sidecar file next to the
+  ledger, `*.lock` 0600 inside the 0700 ledger dir, shared with the gateway
+  emitter): POSIX fcntl.flock, Windows msvcrt.locking, and on any platform with
+  neither primitive the gate fails closed (the tick is skipped, the ledger is
+  untouched). The emitter takes it non-blocking for every append and closed
+  rewrite; this sender holds it for the whole load, mutate, rewrite tick with a
+  bounded wait, then the tick is skipped whole and retried on the next run.
+- Full-file atomic rewrite of the ledger (tmp + rename, hardening after the
+  rename: file 0600 and dir 0700 modes on POSIX, an owner-only ACL on Windows);
   records older than 14 days are pruned on write, hard cap 5000 records.
 - Malformed ledger lines are skipped and quarantined once to
   `alerts.bad.jsonl` next to the ledger.
 - Log lines are capped at 500 chars and never contain the webhook url or key.
 - Loopback http (`127.0.0.1`, `localhost`, `[::1]`) is allowed for trials only;
-  every other url must be https, and redirects count as failures (the sender
-  key header is never replayed to a redirect target).
+  every other url must be https. The webhook file is refused outright when
+  others can read it (0600 mode on POSIX, owner-only ACL on Windows: the check
+  fails closed when the platform cannot tell, and logs one warning per file).
 - Closed records (a waiter settled or vanished) stay ledger-only by default.
   Enable the one-line, link-free chat follow-up with the `--notify-closed` flag
   or `G2C_RUNALERTS_NOTIFY_CLOSED=1` (sender side only; the gateway has no
@@ -40,7 +50,8 @@ Safety rails (built in, none are configurable):
 | File | Purpose |
 | --- | --- |
 | `runalerts/sender.py` | the sender process (`--self-test`, `--ledger`, `--webhook`, `--notify-closed`) |
-| `runalerts/com.md.g2c.runalerts-sender.plist` | launchd timer template (paths only, no secrets) |
+| `runalerts/com.md.g2c.runalerts-sender.plist` | macOS launchd timer template (paths only, no secrets) |
+| `runalerts/install-task-windows.ps1` | Windows Task Scheduler installer template (edit two placeholder paths, review, run) |
 | `tests/test_runalerts_sender.py` | sender test suite (unittest, loopback mock) |
 
 ## Step 1: configure the gateway side (on the machine that runs the gateway)
@@ -113,8 +124,32 @@ repo, never in logs):
     {"url": "<https webhook url>", "sender_key": "<the routine's key>"}
 
 Optional third key: `"key_header": "<header name>"` (default `X-Sender-Key`).
+A pasted full line is accepted and normalized: `sender_key` may be
+`Bearer <key>` or a whole `Authorization: Bearer <key>` line, and either field
+may carry the line that names the header. A key with interior whitespace or a
+malformed header name refuses with an explanatory line (the key value is
+never logged).
 
-## Step 4: install the launchd timer
+Windows: the sender's default webhook path is `%APPDATA%\G2C\g2c-grokbot-webhook.json`
+(or pass `--webhook`). Place it in a directory only the current user can enter
+and give the file an owner-only ACL:
+
+    powershell -Command "icacls 'C:\Users\me\AppData\Roaming\G2C\g2c-grokbot-webhook.json' /inheritance:r /grant:r 'me:F'"
+
+The sender refuses any webhook file or ledger that others can read (on
+Windows it checks the ACL the PowerShell-independent way it can and fails
+closed with one warning when the platform cannot tell; the file lives under
+a private profile directory either way).
+
+## Step 4: schedule the sender (pick the platform's section)
+
+The command is the same everywhere (stdlib Python 3.9+; the ledger path MUST
+equal the config `outbox` from step 1; run as the SAME user who runs the
+gateway and owns the ledger dir):
+
+    python3 runalerts/sender.py --ledger /path/to/alerts.jsonl
+
+### macOS: launchd timer
 
 Fill every `__PLACEHOLDER__` in `runalerts/com.md.g2c.runalerts-sender.plist`
 (python3 path, sender script path, ledger path - MUST equal the config
@@ -122,6 +157,29 @@ Fill every `__PLACEHOLDER__` in `runalerts/com.md.g2c.runalerts-sender.plist`
 
     cp runalerts/com.md.g2c.runalerts-sender.plist ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist
     launchctl load ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist
+
+### Linux: cron or a systemd timer
+
+The tick is idempotent, so cadence is a latency choice only. A plain crontab
+line fires once a minute (fine; every run sends at most the first pending
+record per key):
+
+    * * * * * /usr/bin/python3 /opt/grokbot2hermes/runalerts/sender.py --ledger /path/to/alerts.jsonl
+
+or a systemd user timer with the same exec line (see `systemd-analyze calendar`
+for testing your `OnCalendar` value). No root, no sudo: the ledger dir is the
+gateway user's.
+
+### Windows: Task Scheduler
+
+Set the ledger for the user and edit the two placeholder paths at the top of
+`runalerts/install-task-windows.ps1`, then review the script and run it from a
+regular (non-admin) PowerShell window in the repo checkout:
+
+    setx G2C_RUNALERTS_LEDGER "C:\path\to\alerts.jsonl"
+    powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1
+
+Remove: `powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -Uninstall`
 
 ## Step 5: validate with the self-test
 
@@ -134,8 +192,12 @@ self-test (no `--ledger` argument exists on that path).
 
 ## Rollback
 
-- Stop the sender: `launchctl unload ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist`
-  and delete the plist from `~/Library/LaunchAgents`.
+- Stop the sender on macOS: `launchctl unload
+  ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist` and delete the
+  plist from `~/Library/LaunchAgents`. On Windows:
+  `powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -Uninstall`.
+  On Linux: remove the crontab line or `systemctl --user disable --now` the
+  timer unit.
 - Turn the emitter off: remove the `webapp.run_alerts` block from the gateway's
   `config.yaml` and kickstart that one gateway unit (no env, no block = fully
   off; the trial env vars are for isolated trial homes only).
@@ -156,8 +218,9 @@ self-test (no `--ledger` argument exists on that path).
   `closed_gave_up_iso_utc`), so the state survives restarts and is auditable.
 - The sender is a second writer to the emitter ledger: the gateway appends
   single small JSONL lines, the sender rewrites the whole file only on change.
-  Both sides serialize every mutation on the same fcntl.flock gate (sidecar
-  `*.lock` file, 0600, inside the 0700 ledger dir): the emitter non-blocking, so
+  Both sides serialize every mutation on the same advisory lock gate (sidecar
+  `*.lock` file, 0600, inside the 0700 ledger dir; POSIX flock, Windows
+  msvcrt.locking, fail closed without a primitive): the emitter non-blocking, so
   a contended mutation is skipped with its dedupe state untouched and retried
   next tick; the sender for its whole load, mutate, rewrite section with a
   bounded wait. This closes both review races end to end: no sender rewrite can
