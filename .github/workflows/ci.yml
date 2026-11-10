@@ -61,28 +61,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - name: Byte scan every tracked file for U+2014 and U+2013
-        run: |
-          python3 - <<'PY'
-          import subprocess
-          import sys
-
-          files = subprocess.run(["git", "ls-files", "-z"], check=True,
-                                 capture_output=True).stdout.split(b"\0")
-          offenders = []
-          for name in (f.decode("utf-8") for f in files if f):
-              with open(name, "rb") as handle:
-                  data = handle.read()
-              for tag, needle in (("em dash", b"\xe2\x80\x94"),
-                                  ("en dash", b"\xe2\x80\x93")):
-                  offset = data.find(needle)
-                  if offset != -1:
-                      offenders.append("%s: %s at byte %d" % (name, tag, offset))
-          if offenders:
-              print("\n".join(offenders), file=sys.stderr)
-              sys.exit(1)
-          print("dash scan: 0 hits across %d tracked files" % len(
-              [f for f in files if f]))
-          PY
+        run: python3 .github/scripts/dash_scan.py
 
   secrets:
     runs-on: ubuntu-latest

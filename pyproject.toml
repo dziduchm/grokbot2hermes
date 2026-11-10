@@ -1,0 +1,32 @@
+[project]
+# Metadata only: this project is deliberately NOT pip-installable. It is a
+# stdlib-only command line client and a run-approvals sender, run from the
+# checkout (`./g2h`, `python3 runalerts/sender.py`); there is no build step and
+# no published package. See CONTRIBUTING.md for the pinned dev tooling.
+name = "grokbot2hermes"
+version = "0.2.0"
+description = "Dispatch tasks from Grok Bot to Hermes Agent; stdlib-only client plus an opt-in run-approvals chat alert sender"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "Marcin (dziduchm)" }]
+keywords = ["hermes", "agent", "grok", "dispatch", "approvals"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://github.com/dziduchm/grokbot2hermes"
+Issues = "https://github.com/dziduchm/grokbot2hermes/issues"
+Changelog = "https://github.com/dziduchm/grokbot2hermes/blob/main/CHANGELOG.md"
+
+[tool.ruff]
+# Same interpreter floor as the code and CI; rule selection stays ruff's
+# default (E, F) as invoked by CI and the pinned 0.15.8 version. Line length
+# keeps ruff's default 88; the repo wraps by hand a bit early.
+target-version = "py39"
