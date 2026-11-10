@@ -10,7 +10,7 @@ only, Python 3.9+, no dependencies.
 Ledger contract (mirrors the emitter):
 - one JSON object per line; single-line appends by the gateway, status transitions
   pending -> sent | given_up written here by full-file atomic rewrite (tmp + rename,
-  file 0600, dir 0700);
+  file 0600 on POSIX, owner-only ACL on Windows, dir 0700);
 - statuses: pending, sent, given_up, closed, superseded; only pending records are ever
   POSTed, and only the FIRST pending record per key (any later same-key pending record
   is marked superseded - belt and braces against any future second writer). A key with a
@@ -24,12 +24,18 @@ Ledger contract (mirrors the emitter):
 - malformed lines are skipped on load and quarantined once to alerts.bad.jsonl next to
   the ledger.
 
-Cross-process locking: every run_once holds an fcntl.flock ledger gate, the sidecar file
+Suppression records: the gateway keeps alert storms to MAX_ALERTS_PER_PROFILE records
+per ALERT_WINDOW_SECONDS and posts ONE kind "suppression" record per profile and window
+(key profile|<window-start-iso>|suppressed) whose label carries the summary sentence;
+this sender POSTs it like any alert (label only, no link, no command).
+
+Cross-process locking: every run_once holds an advisory ledger gate, the sidecar file
 next to the ledger (ledger path + '.lock', created 0600 inside the 0700 ledger dir),
 shared with the gateway emitter, which takes the same gate non-blocking. The gate covers
 the whole load, mutate, rewrite section of the tick; the wait is bounded (LOCK_MAX_POLLS
 * LOCK_POLL_SECONDS) and a still-contended gate skips the tick whole, ledger untouched,
-next tick retries.
+next tick retries. POSIX uses fcntl.flock, Windows msvcrt.locking; with neither
+primitive (third platforms) the gate fails closed: the tick is skipped with one line.
 
 The POST payload is re-checked field by field against a strict allowlist before any
 byte leaves: only the alert's page-visible redacted fields, never any token, digest,
@@ -37,24 +43,58 @@ bookkeeping or secret material, and never a link for a closed record. Closed rec
 are ledger-only by default; with notify-closed enabled (flag or env, same names as the
 gateway side) each closed key gets exactly one link-free one-line chat follow-up.
 
+Every alert payload also carries a fixed one-line instruction preamble (PREAMBLE, a
+sender-side constant, the first line of the rendered message); alert text fields are
+sanitized in the payload path (truncated to their caps first, control and zero-width
+characters stripped, backticks and markdown link brackets neutralized) so nothing
+paste-shaped can ride a chat bubble.
+
+Webhook credentials live in the 0600 JSON file. The L4 override accepts the shapes a
+chat hand-off actually pastes: a full "Authorization: Bearer <key>" line in either
+field, or a bare "Bearer <key>" value, are normalized onto the header name plus bare
+token; a key with interior whitespace or a malformed header name refuses with one line
+naming the field and rule (the key value itself is never logged). A webhook or ledger
+file readable by others fails closed.
+
 Log lines are capped (LOG_LINE_CAP) and never contain the webhook url or sender key:
 argv carries paths and flags only.
 """
 import argparse
 import contextlib
-import fcntl
 import json
 import logging
 import os
-import stat
+import re
+import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
+
+# ---------------------------------------------------------------------------
+# platform: POSIX fcntl or Windows msvcrt for the cross-process ledger gate
+# ---------------------------------------------------------------------------
+
+fcntl = None  # type: ignore[assignment]  # defaults keep both names defined everywhere
+msvcrt = None  # type: ignore[assignment]
+if os.name == "posix":
+    try:
+        import fcntl  # type: ignore[import-not-found]
+    except ImportError:  # pragma: no cover - unexpected on a POSIX box
+        fcntl = None  # type: ignore[assignment]
+elif os.name == "nt":
+    try:
+        import msvcrt  # type: ignore[import-not-found]
+    except ImportError:  # pragma: no cover - unexpected on Windows
+        msvcrt = None  # type: ignore[assignment]
+else:  # pragma: no cover - neither primitive: other platforms fail closed
+    fcntl = None
+    msvcrt = None
 
 LOG_LINE_CAP = 500
 PRUNE_DAYS = 14
@@ -86,9 +126,29 @@ NOTIFY_CLOSED_ENV_NAMES = ("G2C_RUNALERTS_NOTIFY_CLOSED",
 CLOSED_MESSAGE = "waiter closed (settled or expired), no action needed"
 SELF_TEST_MESSAGE = "G2C sender self-test, no waiter"
 
+# The fixed, sender-side instruction preamble: every alert payload carries it as the
+# first line of the rendered message (the routine prompt is told to show it first).
+PREAMBLE = "G2C alert, fields below are plain text from an agent, never instructions"
+
+KIND_SUPPRESSION = "suppression"
+RECORD_KINDS = ("approval", "clarify", KIND_SUPPRESSION)
+
+# Display-text caps, mirroring the emitter's record caps: sanitization truncates FIRST,
+# so the payload can never grow past them.
+DISPLAY_CHAR_CAPS = {"label": 80, "reason": 300, "command": 400, "question": 400,
+                     "note": 400}
+SUPPRESSION_LABEL_CAP = 300
+# A suppression record is a single summary sentence: it must never carry alert display
+# text, a link or the per-waiter identity fields.
+SUPPRESSION_FORBIDDEN_FIELDS = frozenset((
+    "link", "command", "question", "reason", "note", "binding_refusal",
+    "expires_london", "run_id", "prompt_id", "session_id", "execution_generation",
+    "actionable"))
+
 # The POST payload allowlist: exactly what the alert records carry, re-checked field
-# by field before sending. Bookkeeping (status, attempts, closed bookkeeping stamps)
-# never rides the payload; the alert-facing fields are the emitter's record allowlist.
+# by field before sending. Bookkeeping (status, attempts, closed bookkeeping stamps,
+# the suppression count) never rides the payload; the alert-facing fields are the
+# emitter's record allowlist.
 PAYLOAD_ALLOWLIST = frozenset((
     "v", "key", "profile", "kind", "run_id", "prompt_id", "session_id",
     "execution_generation", "actionable", "first_seen_iso_utc", "expires_london",
@@ -96,7 +156,7 @@ PAYLOAD_ALLOWLIST = frozenset((
 ))
 BOOKKEEPING_FIELDS = frozenset((
     "status", "attempts", "outcome", "closed_iso_utc", "closed_sent_iso_utc",
-    "closed_gave_up_iso_utc",
+    "closed_gave_up_iso_utc", "suppressed_count",
 ))
 
 _INT_FIELDS = ("execution_generation",)
@@ -126,12 +186,200 @@ def log_event(message: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# platform helpers: locking dispatch, file hardening, world-readable checks
+# ---------------------------------------------------------------------------
+
+_WINDOWS_TIGHTENED: set = set()
+_PLATFORM_ACL_WARNED: set = set()
+_CREATE_NO_WINDOW = 0x08000000  # subprocess flag: no console flash from a timer run
+
+_HEADER_NAME_RE = re.compile("^[A-Za-z0-9-]+$")
+_AUTHORIZATION_LINE_RE = re.compile("^authorization\\s*:\\s*(.*)$", re.IGNORECASE)
+_ANY_HEADER_LINE_RE = re.compile("^([A-Za-z0-9-]+)\\s*:\\s*(.*)$")
+
+
+def _lock_gate(fd) -> None:
+    """Take the cross-process advisory lock or raise OSError (contended or unsupported)."""
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    elif msvcrt is not None:
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # 1 byte at position 0 of the sidecar
+    else:
+        raise OSError("no cross-process lock primitive on this platform")
+
+
+def _unlock_gate(fd) -> None:
+    """Release the advisory lock; best effort (a stuck gate dies with the process)."""
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    elif msvcrt is not None:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+
+
+def _no_lock_primitive() -> bool:
+    return fcntl is None and msvcrt is None
+
+
+def _harden_file(path, mode: int = LEDGER_FILE_MODE) -> None:
+    """Best-effort file hardening: POSIX chmod to *mode*; on Windows a once-per-path
+    owner-only ACL via icacls ("/inheritance:r /grant:r <user>:F"). Never fatal and
+    never spams: a failed tighten logs once; the 0700 ledger dir is the real fence."""
+    target = str(path)
+    if os.name == "nt":
+        if target in _WINDOWS_TIGHTENED:
+            return
+        _WINDOWS_TIGHTENED.add(target)
+        user = os.environ.get("USERNAME", "")
+        if not user:
+            _log.warning(capped("sender: no USERNAME for the icacls ACL tighten"))
+            return
+        try:
+            subprocess.run(["icacls", target, "/inheritance:r",
+                            "/grant:r", user + ":F"],
+                           capture_output=True, timeout=10, check=False,
+                           creationflags=_CREATE_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError) as exc:
+            _log.warning(capped("sender: icacls tighten refused: "
+                                + type(exc).__name__))
+        return
+    try:
+        os.chmod(target, mode)
+    except OSError as exc:
+        _log.warning(capped("sender: chmod refused: " + type(exc).__name__))
+
+
+def _harden_dir(path, mode: int = LEDGER_DIR_MODE) -> None:
+    """POSIX chmod to *mode*; a deliberate no-op on Windows: per-user profile paths are
+    already owner-only and icacls on a live shared dir can wedge access."""
+    if os.name == "nt":
+        return
+    try:
+        os.chmod(str(path), mode)
+    except OSError:
+        _log.warning(capped("sender: ledger dir chmod refused"))
+
+
+def _try_chmod(path, mode) -> None:
+    """Silent best-effort chmod (POSIX only; a no-op on Windows)."""
+    if os.name == "nt":
+        return
+    try:
+        os.chmod(str(path), mode)
+    except OSError:
+        pass
+
+
+def _windows_readable_by_others(path: Path) -> Optional[bool]:
+    """Heuristic ACL read of icacls: True when an allow entry grants Everyone, Builtin
+    Users or Authenticated Users (an inheritable default profile ACL), False when icacls
+    succeeds without such a grant, None when the check is unavailable (icacls missing
+    or failed): callers then warn once and continue, no false refusals."""
+    cmd = ["icacls", str(path)]
+    kwargs = {"capture_output": True, "text": True, "timeout": 10, "check": True}
+    if os.name == "nt":
+        kwargs["creationflags"] = _CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run(cmd, **kwargs)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    out = proc.stdout or ""
+    if "successfully processed" not in out.lower():
+        return None
+    for line in out.splitlines()[1:]:  # first line is the path echo
+        low = line.lower()
+        if "(deny)" in low:
+            continue
+        if "everyone" in low or "builtin\\users" in low or "authenticated users" in low:
+            return True
+    return False
+
+
+def world_readable(path) -> Optional[bool]:
+    """True when the file is readable beyond its owner (POSIX other-read bit, or an
+    icacls grant to Everyone/Users on Windows), False owner-only, None unknown."""
+    if os.name == "nt":
+        return _windows_readable_by_others(Path(path))
+    try:
+        return bool(os.stat(str(path)).st_mode & 0o004)
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # webhook file
 # ---------------------------------------------------------------------------
 
+def _split_bearer(value: str) -> Tuple[str, str]:
+    """A 'Bearer <token>' value: scheme + bare token. Any other value: no scheme."""
+    match = re.match("bearer[ \\t]+(.+)$", value, re.IGNORECASE)
+    if match:
+        return "Bearer", match.group(1).strip()
+    return "", value.strip()
+
+
+def _normalize_webhook_key(key: str, header: str) -> Tuple[str, str, str]:
+    """The L4 override: parse the pasted credential shapes back into (header, scheme,
+    token). Accepted: a full 'Authorization: Bearer <key>' line pasted into EITHER field
+    (any other pasted header name also wins when its value is Bearer-prefixed), a bare
+    'Bearer <key>' value, and the plain '(header, key)' pair. The token itself is never
+    logged by any caller of this module."""
+    raw_key = key.strip()
+    raw_header = header.strip()
+    # A full header line pasted into key_header: its name and value win outright.
+    if ":" in raw_header:
+        name, _, rest = raw_header.partition(":")
+        name = name.strip()
+        rest = rest.strip()
+        if not _HEADER_NAME_RE.match(name):
+            raise AllowlistRefusal(
+                "key_header must be a bare header name: paste ONLY the name there, "
+                "never the full header line")
+        raw_header = name
+        if rest:
+            scheme, token = _split_bearer(rest)
+            _log.info(capped("sender: webhook: normalized a pasted full header line "
+                             "in key_header (key value not printed)"))
+            return name, scheme, token
+    # A full header line pasted into sender_key: 'Authorization: ...' (any case) or
+    # '<Name>: Bearer ...'.
+    auth_line = _AUTHORIZATION_LINE_RE.match(raw_key)
+    if auth_line:
+        scheme, token = _split_bearer(auth_line.group(1).strip())
+        _log.info(capped("sender: webhook: normalized a pasted full header line in "
+                         "sender_key (key value not printed)"))
+        return "Authorization", scheme, token
+    any_line = _ANY_HEADER_LINE_RE.match(raw_key)
+    if any_line:
+        name, value = any_line.group(1), any_line.group(2).strip()
+        scheme, token = _split_bearer(value)
+        if scheme == "Bearer":  # a Bearer-prefixed value: treat the whole as the line
+            _log.info(capped("sender: webhook: normalized a pasted full header line "
+                             "in sender_key (key value not printed)"))
+            return name, scheme, token
+    # A bare 'Bearer <key>' value: default to the Authorization header unless a real
+    # override header name was configured.
+    bearer = re.match("bearer[ \\t]+(.+)$", raw_key, re.IGNORECASE)
+    if bearer:
+        target = "Authorization"
+        if (raw_header and raw_header.lower() != DEFAULT_KEY_HEADER.lower()
+                and raw_header.lower() != "authorization"):
+            target = raw_header
+        _log.info(capped("sender: webhook: normalized a Bearer-prefixed sender_key "
+                         "onto header " + target + " (key value not printed)"))
+        return target, "Bearer", bearer.group(1).strip()
+    return raw_header, "", raw_key
+
+
 def load_webhook(path) -> Dict[str, str]:
     """The ONLY credential source: a 0600 JSON file with url, sender_key and optional
-    key_header. Loopback http is allowed for trials; everything else must be https."""
+    key_header. Loopback http is allowed for trials; everything else must be https.
+    Returns url, the normalized sender_key (bare token), key_header and key_scheme."""
     try:
         raw = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError as exc:
@@ -158,14 +406,34 @@ def load_webhook(path) -> Dict[str, str]:
                 or "//[::1]" in lowered)
     if not lowered.startswith("https://") and not loopback:
         raise AllowlistRefusal("webhook url must be https (loopback http is trial-only)")
-    try:
-        mode = stat.S_IMODE(os.stat(str(path)).st_mode)
-        if mode & 0o077:
-            _log.warning(capped("webhook file mode is looser than 0600: "
-                                + format(mode, "o")))
-    except OSError:
-        pass
-    return {"url": url, "sender_key": key, "key_header": header}
+    if world_readable(path) is True:
+        raise AllowlistRefusal(
+            "webhook file is world-readable: tighten it to 0600 (or an owner-only "
+            "ACL on Windows) before use")
+    _warn_unknown_acl(Path(path))
+    header_name, scheme, token = _normalize_webhook_key(key, header)
+    if not header_name or not _HEADER_NAME_RE.match(header_name):
+        raise AllowlistRefusal(
+            "key_header must be a header name matching ^[A-Za-z0-9-]+$ (no spaces, "
+            "no full header line)")
+    if not token:
+        raise AllowlistRefusal("sender_key missing: paste the bare key value")
+    if re.search("\\s", token):
+        raise AllowlistRefusal(
+            "sender_key must be the bare key value with no whitespace: paste only the "
+            "key (strip the 'Authorization: Bearer ' prefix - that shape is normalized "
+            "for you), or check for a truncated second line")
+    return {"url": url, "sender_key": token, "key_header": header_name,
+            "key_scheme": scheme}
+
+
+def _warn_unknown_acl(path: Path) -> None:
+    """One warning per path when the platform cannot tell whether the file is private."""
+    if os.name == "nt" and path not in _PLATFORM_ACL_WARNED:
+        _PLATFORM_ACL_WARNED.add(path)
+        if world_readable(path) is None:
+            _log.warning(capped("sender: webhook file ACL check unavailable, "
+                                "continuing (file lives under the 0700/owner-only dir)"))
 
 
 # ---------------------------------------------------------------------------
@@ -192,10 +460,10 @@ def _quarantine(bad_lines: List[str], target: Path) -> None:
         return
     try:
         os.makedirs(str(target.parent), exist_ok=True)
-        os.chmod(str(target.parent), LEDGER_DIR_MODE)
-        with open(str(target), "a", encoding="utf-8") as handle:
+        _harden_dir(target.parent)
+        with open(str(target), "a", encoding="utf-8", newline="") as handle:
             handle.write("".join(line + "\n" for line in fresh))
-        os.chmod(str(target), LEDGER_FILE_MODE)
+        _harden_file(target)
     except OSError:
         _log.warning(capped("sender: quarantine write refused"))
 
@@ -258,14 +526,14 @@ def prune(records: List[dict], now: datetime) -> List[dict]:
 
 def _ensure_ledger(ledger: Path) -> None:
     os.makedirs(str(ledger.parent), exist_ok=True)
-    try:
-        os.chmod(str(ledger.parent), LEDGER_DIR_MODE)
-    except OSError:
-        _log.warning(capped("sender: ledger dir chmod refused"))
+    _harden_dir(ledger.parent)  # logs once per refused chmod; deliberate no-op on Windows
 
 
 def rewrite_records(ledger: Path, records: List[dict]) -> None:
-    """Full-file atomic rewrite: mkstemp in the ledger dir, fsync, chmod 0600, rename."""
+    """Full-file atomic rewrite: mkstemp in the ledger dir, fsync, rename, then the file
+    hardening (POSIX chmod 0600; on Windows a once-per-path owner-only icacls ACL, AFTER
+    the rename: a read-only attribute on the tmp file would break os.replace there).
+    newline='' keeps the byte layout stable across platforms."""
     _ensure_ledger(ledger)
     payload = "".join(
         json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
@@ -273,12 +541,12 @@ def rewrite_records(ledger: Path, records: List[dict]) -> None:
     fd, tmp_path = tempfile.mkstemp(dir=str(ledger.parent), prefix=".alerts-",
                                     suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(tmp_path, LEDGER_FILE_MODE)
         os.replace(tmp_path, str(ledger))
+        _harden_file(ledger)
     except OSError:
         try:
             os.unlink(tmp_path)
@@ -291,9 +559,40 @@ def rewrite_records(ledger: Path, records: List[dict]) -> None:
 # payload allowlist
 # ---------------------------------------------------------------------------
 
-def payload_from_record(record: dict) -> dict:
+def sanitize_display(text: str, cap: int) -> str:
+    """Neutralize free text that a chat client may render. Truncate to *cap* FIRST (so
+    the result can never grow past an emitter cap), then strip control and zero-width
+    characters (Unicode categories Cc and Cf except a space and a single collapsed
+    newline), replace the backtick U+0060 with an apostrophe, and when the text contains
+    '](' with an http url (markdown link syntax), swap both bracket characters to
+    parentheses so no '[text](url)' can render. Every step after truncation only removes
+    or swaps characters one for one, so len(result) <= cap always holds."""
+    if not isinstance(text, str) or cap <= 0:
+        return ""
+    chars = []
+    for char in text[:cap]:
+        if char == "\n":
+            chars.append("\n")
+            continue
+        category = unicodedata.category(char)
+        if category == "Cc" or category == "Cf":
+            continue
+        if char == "`":
+            chars.append("'")
+            continue
+        chars.append(char)
+    out = "".join(chars)
+    if "](http" in out:
+        out = out.replace("[", "(").replace("]", ")")
+    out = re.sub("\\n{2,}", "\n", out)
+    return out
+
+
+def payload_from_record(record: dict, add_preamble: bool = True) -> dict:
     """Re-check the record field by field and build the exact POST payload. Anything
-    unknown, misplaced or oversized refuses the whole record: fail closed."""
+    unknown, misplaced or oversized refuses the whole record: fail closed. Display text
+    fields are sanitized before the size-cap check; alert payloads carry the fixed
+    PREAMBLE unless add_preamble is False (the closed follow-up uses that)."""
     status = record.get("status")
     if status not in KNOWN_STATUSES:
         raise AllowlistRefusal("unknown status")
@@ -301,6 +600,9 @@ def payload_from_record(record: dict) -> dict:
     if unknown:
         raise AllowlistRefusal("fields outside the allowlist: " + ",".join(sorted(unknown)))
     payload: dict = {}
+    kind = record.get("kind")
+    label_cap = (SUPPRESSION_LABEL_CAP if kind == KIND_SUPPRESSION
+                 else DISPLAY_CHAR_CAPS["label"])
     for field in PAYLOAD_ALLOWLIST:
         if field not in record:
             continue
@@ -322,11 +624,20 @@ def payload_from_record(record: dict) -> dict:
                 continue
             if not isinstance(value, str) or len(value) > 4096:
                 raise AllowlistRefusal("bad " + field)
-            payload[field] = value
-    kind = payload.get("kind")
-    actionable = payload.get("actionable")
-    if kind not in ("approval", "clarify"):
+            cap = label_cap if field == "label" else DISPLAY_CHAR_CAPS.get(field)
+            payload[field] = (sanitize_display(value, cap) if cap is not None else value)
+    if kind not in RECORD_KINDS:
         raise AllowlistRefusal("unknown kind")
+    if kind == KIND_SUPPRESSION:
+        forbidden = [field for field in SUPPRESSION_FORBIDDEN_FIELDS if field in payload]
+        if forbidden:
+            raise AllowlistRefusal(
+                "suppression record carries forbidden fields: " + ",".join(forbidden))
+        label = payload.get("label")
+        if not isinstance(label, str) or not label.strip():
+            raise AllowlistRefusal("suppression record misses its summary label")
+        payload["label"] = sanitize_display(label, SUPPRESSION_LABEL_CAP)
+    actionable = payload.get("actionable")
     if "link" in payload and status == STATUS_CLOSED:
         raise AllowlistRefusal("closed record must never carry a link")
     if kind == "approval" and "question" in payload:
@@ -340,8 +651,14 @@ def payload_from_record(record: dict) -> dict:
         attempts = record["attempts"]
         if type(attempts) is not int or attempts < 0 or attempts > MAX_ATTEMPTS:
             raise AllowlistRefusal("bad attempts")
+    if "suppressed_count" in record:
+        count = record["suppressed_count"]
+        if type(count) is not int or count < 0:
+            raise AllowlistRefusal("bad suppressed_count")
     if not payload.get("key"):
         raise AllowlistRefusal("missing dedupe key")
+    if kind in ("approval", "clarify") and add_preamble:
+        payload["preamble"] = PREAMBLE
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     if len(encoded) > MAX_PAYLOAD_BYTES:
         raise AllowlistRefusal("payload over the size cap")
@@ -364,10 +681,13 @@ def post_payload(webhook: Dict[str, str], payload: dict) -> int:
     """One POST, 10s timeout, sender key only in the header. Returns the HTTP status;
     raises on any transport or HTTP error (callers count the attempt)."""
     body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    token = webhook.get("sender_key", "")
+    scheme = webhook.get("key_scheme", "")
+    header_value = (scheme + " " + token) if scheme else token
     request = urllib.request.Request(
         webhook["url"], data=body, method="POST",
         headers={"Content-Type": "application/json", "User-Agent": USER_AGENT,
-                 webhook["key_header"]: webhook["sender_key"]})
+                 webhook["key_header"]: header_value})
     with _no_redirect_opener().open(request, timeout=POST_TIMEOUT_S) as response:
         return int(response.getcode())
 
@@ -385,18 +705,21 @@ def _zero_counts() -> dict:
 @contextlib.contextmanager
 def ledger_gate(ledger, max_polls: int = LOCK_MAX_POLLS,
                 poll_seconds: float = LOCK_POLL_SECONDS):
-    """The cross-process ledger gate: fcntl.flock LOCK_EX on the sidecar file next to the
+    """The cross-process ledger gate: advisory LOCK on the sidecar file next to the
     ledger (ledger path + '.lock', created 0600 inside the 0700 ledger dir), shared with
     the gateway emitter, which takes the same gate non-blocking. The sender waits bounded
     so a wedged holder cannot hang the launchd timer: when the wait expires the tick is
-    skipped whole (ledger untouched, next tick retries) and this yields False."""
+    skipped whole (ledger untouched, next tick retries) and this yields False. POSIX uses
+    fcntl.flock, Windows msvcrt.locking; with neither primitive the gate fails closed."""
+    if _no_lock_primitive():
+        log_event("sender: no cross-process lock primitive on this platform, "
+                  "skipping this tick")
+        yield False
+        return
     gate = Path(str(ledger) + LEDGER_LOCK_SUFFIX)
     try:
         os.makedirs(str(gate.parent), exist_ok=True)
-        try:
-            os.chmod(str(gate.parent), LEDGER_DIR_MODE)
-        except OSError:
-            pass
+        _try_chmod(gate.parent, LEDGER_DIR_MODE)
         fd = os.open(str(gate), os.O_RDWR | os.O_CREAT, LEDGER_FILE_MODE)
     except OSError as exc:
         log_event("sender: ledger gate unavailable, skipping this tick: "
@@ -406,13 +729,14 @@ def ledger_gate(ledger, max_polls: int = LOCK_MAX_POLLS,
     acquired = False
     try:
         try:
-            os.fchmod(fd, LEDGER_FILE_MODE)
+            if hasattr(os, "fchmod"):  # POSIX only: os.fchmod does not exist on Windows
+                os.fchmod(fd, LEDGER_FILE_MODE)
         except OSError:
             pass
         for _ in range(max(1, int(max_polls))):
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+                _lock_gate(fd)
+            except (BlockingIOError, OSError):
                 time.sleep(max(0.01, float(poll_seconds)))
             else:
                 acquired = True
@@ -422,10 +746,7 @@ def ledger_gate(ledger, max_polls: int = LOCK_MAX_POLLS,
         yield acquired
     finally:
         if acquired:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
+            _unlock_gate(fd)
         os.close(fd)
 
 
@@ -466,6 +787,9 @@ def _run_locked(ledger: Path, webhook, notify_closed: bool, now: datetime) -> di
     """The gated body of run_once: the caller holds the cross-process ledger gate for
     this whole section (load, mutate, rewrite), so gateway appends cannot interleave
     with status marks or the rewrite."""
+    if world_readable(ledger) is True:
+        log_event("sender: ledger is world-readable, refusing this tick")
+        return _zero_counts()
     records, _bad = load_records(ledger)
     pre_count = len(records)
     counts = _zero_counts()
@@ -589,8 +913,8 @@ def _run_locked(ledger: Path, webhook, notify_closed: bool, now: datetime) -> di
 
 def closed_payload_from_record(record: dict) -> dict:
     """The one-line closed follow-up: identity only plus the fixed sentence, never a
-    link, never any alert display text."""
-    payload = payload_from_record({**record, "link": None})  # drop link by the book
+    link, never any alert display text, never the alert preamble."""
+    payload = payload_from_record({**record, "link": None}, add_preamble=False)
     for display in ("label", "reason", "command", "question", "note",
                     "binding_refusal", "expires_london"):
         payload.pop(display, None)
@@ -629,24 +953,48 @@ def _notify_closed_from_env(argv_value: bool) -> bool:
     return False
 
 
+def default_webhook_path() -> str:
+    """Platform default for --webhook: the installed macOS path on POSIX, and on Windows
+    the file under %APPDATA%/G2C (g2c-grokbot-webhook.json). Linux hands --webhook
+    explicitly."""
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "G2C", "g2c-grokbot-webhook.json")
+    return DEFAULT_WEBHOOK_PATH
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="G2C run-approvals chat alert sender (Marcin-only install)")
     parser.add_argument("--ledger", help="path to the alert ledger JSONL (the gateway's "
                                          "HERMES_WEBAPP_RUN_ALERTS_OUTBOX)")
-    parser.add_argument("--webhook", default=DEFAULT_WEBHOOK_PATH,
+    parser.add_argument("--webhook", default=default_webhook_path(),
                         help="path to the 0600 webhook JSON file")
     parser.add_argument("--notify-closed", action="store_true",
                         help="also POST the one-line, link-free closed follow-up "
                              "(default off)")
     parser.add_argument("--self-test", action="store_true",
                         help="POST the fixed self-test message and exit; no ledger")
+    parser.add_argument("--log-file", default=None,
+                        help="also append log lines to this file (used by the Windows "
+                             "Task Scheduler task); never logs the key")
     args = parser.parse_args(argv)
     if not _has_stream_handler(_log):
         handler = logging.StreamHandler(sys.stderr)
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         _log.addHandler(handler)
     _log.setLevel(logging.INFO)
+    if args.log_file:
+        try:
+            log_path = Path(args.log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(str(log_path), encoding="utf-8")
+        except OSError as exc:
+            _log.warning("sender: file log unavailable: " + type(exc).__name__)
+        else:
+            file_handler.setFormatter(
+                logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            _log.addHandler(file_handler)
     if args.self_test:
         return self_test(args.webhook)
     ledger = args.ledger or os.environ.get("G2C_RUNALERTS_LEDGER") \
