@@ -564,7 +564,8 @@ def sanitize_display(text: str, cap: int) -> str:
     the result can never grow past an emitter cap), then strip control and zero-width
     characters (Unicode categories Cc and Cf except a space and a single collapsed
     newline), replace the backtick U+0060 with an apostrophe, and when the text contains
-    '](' with an http url (markdown link syntax), swap both bracket characters to
+    '](' with an http or https url (case insensitive, optional whitespace after the
+    parenthesis; markdown link syntax), swap both bracket characters to
     parentheses so no '[text](url)' can render. Every step after truncation only removes
     or swaps characters one for one, so len(result) <= cap always holds."""
     if not isinstance(text, str) or cap <= 0:
@@ -582,7 +583,9 @@ def sanitize_display(text: str, cap: int) -> str:
             continue
         chars.append(char)
     out = "".join(chars)
-    if "](http" in out:
+    # Case insensitive and whitespace tolerant: uppercase urls and '](' spaces
+    # neutralize too, while bracket text without a link never changes.
+    if re.search(r"\]\(\s*https?://", out, re.IGNORECASE):
         out = out.replace("[", "(").replace("]", ")")
     out = re.sub("\\n{2,}", "\n", out)
     return out
@@ -982,8 +985,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--self-test", action="store_true",
                         help="POST the fixed self-test message and exit; no ledger")
     parser.add_argument("--log-file", default=None,
-                        help="also append log lines to this file (used by the Windows "
-                             "Task Scheduler task); never logs the key")
+                        help="also append log lines to this file (hardened to 0600 "
+                             "or an owner-only ACL on creation, best-effort like "
+                             "the ledger files; used by the Windows Task Scheduler "
+                             "task); never logs the key")
     args = parser.parse_args(argv)
     if not _has_stream_handler(_log):
         handler = logging.StreamHandler(sys.stderr)
@@ -998,6 +1003,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         except OSError as exc:
             _log.warning("sender: file log unavailable: " + type(exc).__name__)
         else:
+            _harden_file(log_path)
             file_handler.setFormatter(
                 logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
             _log.addHandler(file_handler)

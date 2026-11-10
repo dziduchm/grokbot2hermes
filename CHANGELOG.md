@@ -27,11 +27,16 @@ Added:
   normalizes onto the header name plus bare token; a key with interior
   whitespace or a malformed header name refuses with an explanatory line
   naming the field and rule. The key value is never logged, never on argv.
+- Sanitization trigger hardening: markdown link neutering catches
+  `]( https://...` with uppercase and interior spaces too (case insensitive,
+  whitespace tolerant), not only the lowercase `](http` substring; plain
+  bracket text without a link is still left alone.
 - Windows support: the ledger gate dispatches per platform (fcntl.flock,
   msvcrt.locking, fail closed without a primitive), owner-only icacls
   hardening for the webhook file, ledger, ledger dir and lock file, a
   platform-aware default webhook path (`%APPDATA%/G2C/...`), `--log-file`
-  for scheduled runs, and `--notify-closed` unchanged.
+  for scheduled runs hardened to 0600/owner-only on creation, and
+  `--notify-closed` unchanged.
 - CI: ruff now also lints `runalerts/`; windows-latest legs (Python 3.9,
   3.12) join the ubuntu and macos legs; the g2h client suite is documented
   and enforced as POSIX-only (module-level skip on Windows), with the
