@@ -265,8 +265,9 @@ Security model in one paragraph: human-only settlement (Marcin answers on
 the phone page himself; nothing in this path can approve, deny or resolve a
 waiter and nothing in it holds a credential that could), webhook fail-closed
 (https required outside loopback, redirects count as failures so the key is
-never replayed to a redirect target, world-readable credential files are
-refused), sender-side sanitization with a fixed instruction preamble (agent
+never replayed to a redirect target, credential files readable by group or
+others are refused, and an inconclusive privacy check refuses too),
+sender-side sanitization with a fixed instruction preamble (agent
 free text is truncated, control characters stripped and markdown syntax
 defanged before it reaches chat), a suppression budget on the emitter side
 (one summary record per window, no storms), and it all rides the tailnet's

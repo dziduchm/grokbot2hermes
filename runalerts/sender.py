@@ -190,7 +190,6 @@ def log_event(message: str) -> None:
 # ---------------------------------------------------------------------------
 
 _WINDOWS_TIGHTENED: set = set()
-_PLATFORM_ACL_WARNED: set = set()
 _CREATE_NO_WINDOW = 0x08000000  # subprocess flag: no console flash from a timer run
 
 _HEADER_NAME_RE = re.compile("^[A-Za-z0-9-]+$")
@@ -279,7 +278,8 @@ def _windows_readable_by_others(path: Path) -> Optional[bool]:
     """Heuristic ACL read of icacls: True when an allow entry grants Everyone, Builtin
     Users or Authenticated Users (an inheritable default profile ACL), False when icacls
     succeeds without such a grant, None when the check is unavailable (icacls missing
-    or failed): callers then warn once and continue, no false refusals."""
+    or failed): a None result refuses fail-closed exactly like an explicit
+    world-readable result."""
     cmd = ["icacls", str(path)]
     kwargs = {"capture_output": True, "text": True, "timeout": 10, "check": True}
     if os.name == "nt":
@@ -301,12 +301,15 @@ def _windows_readable_by_others(path: Path) -> Optional[bool]:
 
 
 def world_readable(path) -> Optional[bool]:
-    """True when the file is readable beyond its owner (POSIX other-read bit, or an
-    icacls grant to Everyone/Users on Windows), False owner-only, None unknown."""
+    """True when the file is readable beyond its owner (POSIX any group-read or
+    other-read bit, or an icacls grant to Everyone/Users on Windows), False
+    owner-only, None when the platform check cannot tell (callers refuse)."""
     if os.name == "nt":
         return _windows_readable_by_others(Path(path))
     try:
-        return bool(os.stat(str(path)).st_mode & 0o004)
+        # 0o077 covers the group bits too: on macOS the default staff group makes
+        # a 0640 file readable by every local account, not only other users.
+        return bool(os.stat(str(path)).st_mode & 0o077)
     except OSError:
         return None
 
@@ -406,11 +409,17 @@ def load_webhook(path) -> Dict[str, str]:
                 or "//[::1]" in lowered)
     if not lowered.startswith("https://") and not loopback:
         raise AllowlistRefusal("webhook url must be https (loopback http is trial-only)")
-    if world_readable(path) is True:
+    readable = world_readable(path)
+    if readable is True:
         raise AllowlistRefusal(
-            "webhook file is world-readable: tighten it to 0600 (or an owner-only "
-            "ACL on Windows) before use")
-    _warn_unknown_acl(Path(path))
+            "webhook file is readable by group or others: tighten it to 0600 "
+            "(or an owner-only ACL on Windows) before use")
+    if readable is None:
+        # Unknown privacy is a refusal: the fail-closed contract also holds when
+        # the platform check cannot tell, never a warn-once-and-continue.
+        raise AllowlistRefusal(
+            "webhook file privacy is unknown (the platform check could not "
+            "tell): refusing fail-closed")
     header_name, scheme, token = _normalize_webhook_key(key, header)
     if not header_name or not _HEADER_NAME_RE.match(header_name):
         raise AllowlistRefusal(
@@ -425,15 +434,6 @@ def load_webhook(path) -> Dict[str, str]:
             "for you), or check for a truncated second line")
     return {"url": url, "sender_key": token, "key_header": header_name,
             "key_scheme": scheme}
-
-
-def _warn_unknown_acl(path: Path) -> None:
-    """One warning per path when the platform cannot tell whether the file is private."""
-    if os.name == "nt" and path not in _PLATFORM_ACL_WARNED:
-        _PLATFORM_ACL_WARNED.add(path)
-        if world_readable(path) is None:
-            _log.warning(capped("sender: webhook file ACL check unavailable, "
-                                "continuing (file lives under the 0700/owner-only dir)"))
 
 
 # ---------------------------------------------------------------------------
@@ -787,8 +787,14 @@ def _run_locked(ledger: Path, webhook, notify_closed: bool, now: datetime) -> di
     """The gated body of run_once: the caller holds the cross-process ledger gate for
     this whole section (load, mutate, rewrite), so gateway appends cannot interleave
     with status marks or the rewrite."""
-    if world_readable(ledger) is True:
-        log_event("sender: ledger is world-readable, refusing this tick")
+    readable = world_readable(ledger)
+    if readable is True:
+        log_event("sender: ledger is readable by group or others, "
+                  "refusing this tick")
+        return _zero_counts()
+    if readable is None:
+        log_event("sender: ledger privacy is unknown (the platform check could "
+                  "not tell), refusing this tick")
         return _zero_counts()
     records, _bad = load_records(ledger)
     pre_count = len(records)

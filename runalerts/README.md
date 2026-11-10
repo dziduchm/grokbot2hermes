@@ -38,8 +38,9 @@ Safety rails (built in, none are configurable):
 - Log lines are capped at 500 chars and never contain the webhook url or key.
 - Loopback http (`127.0.0.1`, `localhost`, `[::1]`) is allowed for trials only;
   every other url must be https. The webhook file is refused outright when
-  others can read it (0600 mode on POSIX, owner-only ACL on Windows: the check
-  fails closed when the platform cannot tell, and logs one warning per file).
+  others can read it (0600 mode on POSIX, owner-only ACL on Windows: any
+  group-read bit refuses too, and an inconclusive check refuses fail closed
+  instead of continuing with one warning).
 - Closed records (a waiter settled or vanished) stay ledger-only by default.
   Enable the one-line, link-free chat follow-up with the `--notify-closed` flag
   or `G2C_RUNALERTS_NOTIFY_CLOSED=1` (sender side only; the gateway has no
@@ -136,10 +137,11 @@ and give the file an owner-only ACL:
 
     powershell -Command "icacls 'C:\Users\me\AppData\Roaming\G2C\g2c-grokbot-webhook.json' /inheritance:r /grant:r 'me:F'"
 
-The sender refuses any webhook file or ledger that others can read (on
-Windows it checks the ACL the PowerShell-independent way it can and fails
-closed with one warning when the platform cannot tell; the file lives under
-a private profile directory either way).
+The sender refuses any webhook file or ledger that group members or others
+can read (0600 on POSIX: the macOS staff group alone spans every local
+account; on Windows it checks the ACL the PowerShell-independent way it
+can). An inconclusive check refuses too: fail closed when the platform
+cannot tell (the file lives under a private profile directory either way).
 
 ## Step 4: schedule the sender (pick the platform's section)
 

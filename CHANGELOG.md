@@ -41,9 +41,10 @@ Added:
 
 Security in this release, unchanged from design (see SECURITY.md):
 human-only settlement, https-required webhooks outside loopback, redirect
-refusal so the key is never replayed, fail-closed world-readable checks,
-3-attempt give-up, suppression budget on the emitter side, 500-char capped
-logs without url or key.
+refusal so the key is never replayed, fail-closed credential-file privacy
+checks (group or other readable bits refuse; an inconclusive platform check
+refuses too), 3-attempt give-up, suppression budget on the emitter side,
+500-char capped logs without url or key.
 
 ## 0.1.0
 

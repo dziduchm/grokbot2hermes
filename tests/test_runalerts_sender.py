@@ -16,6 +16,7 @@ import stat
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, List, Optional
 
@@ -767,7 +768,8 @@ class SenderCase(unittest.TestCase):
         finally:
             server.stop()
         self.assertEqual(len(server.requests), 0)
-        self.assertTrue(any("world-readable" in line for line in self.logs))
+        self.assertTrue(any("readable by group or others" in line
+                            for line in self.logs))
 
     @unittest.skipIf(os.name == "nt", "POSIX chmod-only check; Windows uses icacls")
     def test_world_readable_ledger_is_refused(self):
@@ -781,8 +783,88 @@ class SenderCase(unittest.TestCase):
             server.stop()
         self.assertEqual(server.requests, [])
         self.assertEqual(counts, sender._zero_counts())
-        self.assertTrue(any("ledger is world-readable" in line
+        self.assertTrue(any("ledger is readable by group or others" in line
                             for line in self.logs))
+
+    @unittest.skipIf(os.name == "nt", "POSIX chmod-only check; Windows uses icacls")
+    def test_group_readable_0640_webhook_is_refused(self):
+        # 0o077: the group bits refuse too; on macOS the staff group alone makes
+        # a 0640 file readable by every local account.
+        self.write_ledger([approval_record()])
+        path = self.webhook_file_raw("https://hook.example/x", DUMMY_KEY)
+        os.chmod(path, 0o640)
+        server = CaptureServer()
+        try:
+            counts = sender.run_once(self.ledger, path, now=self.now())
+        finally:
+            server.stop()
+        self.assertEqual(counts, sender._zero_counts())
+        self.assertEqual(len(server.requests), 0)
+        self.assertTrue(any("readable by group or others" in line
+                            for line in self.logs))
+
+    @unittest.skipIf(os.name == "nt", "POSIX chmod-only check; Windows uses icacls")
+    def test_group_readable_0640_ledger_is_refused(self):
+        self.write_ledger([approval_record()])
+        os.chmod(self.ledger, 0o640)
+        server = CaptureServer()
+        try:
+            counts = sender.run_once(self.ledger, self.webhook_file(server),
+                                     now=self.now())
+        finally:
+            server.stop()
+        self.assertEqual(server.requests, [])
+        self.assertEqual(counts, sender._zero_counts())
+        self.assertTrue(any("ledger is readable by group or others" in line
+                            for line in self.logs))
+
+    def test_unknown_acl_refuses_fail_closed_webhook(self):
+        # When the platform cannot tell (None), the sender refuses instead of
+        # warning once and continuing.
+        with mock.patch.object(sender, "world_readable", return_value=None):
+            self.write_ledger([approval_record()])
+            before = open(self.ledger, encoding="utf-8").read()
+            counts = sender.run_once(
+                self.ledger, self.webhook_file(url="https://hook.example/x"),
+                now=self.now())
+        self.assertEqual(counts, sender._zero_counts())
+        self.assertEqual(open(self.ledger, encoding="utf-8").read(), before)
+        self.assertTrue(any("privacy is unknown" in line for line in self.logs))
+
+    def test_unknown_acl_on_the_ledger_refuses_that_tick(self):
+        # The same contract on the ledger path: webhook False (proceeds), ledger
+        # None (refuses the tick whole).
+        def fake(path):
+            return None if str(path).endswith(".jsonl") else False
+
+        self.write_ledger([approval_record()])
+        before = open(self.ledger, encoding="utf-8").read()
+        server = CaptureServer()
+        try:
+            with mock.patch.object(sender, "world_readable", side_effect=fake):
+                counts = sender.run_once(self.ledger, self.webhook_file(server),
+                                         now=self.now())
+        finally:
+            server.stop()
+        self.assertEqual(server.requests, [])
+        self.assertEqual(counts, sender._zero_counts())
+        self.assertEqual(open(self.ledger, encoding="utf-8").read(), before)
+        self.assertTrue(any("ledger privacy is unknown" in line
+                            for line in self.logs))
+
+    def test_owner_only_files_still_proceed(self):
+        # The fail-closed contract bites only the unknown case: a clear False
+        # (owner-only file) proceeds and posts.
+        self.write_ledger([approval_record()])
+        server = CaptureServer()
+        try:
+            with mock.patch.object(sender, "world_readable", return_value=False):
+                counts = sender.run_once(self.ledger, self.webhook_file(server),
+                                         now=self.now())
+        finally:
+            server.stop()
+        self.assertEqual(counts["sent"], 1)
+        self.assertEqual(len(server.requests), 1)
 
     # --- platform dispatch and Windows helpers ----------------------------------
 
