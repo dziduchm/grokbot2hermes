@@ -35,11 +35,16 @@ $ chmod +x g2h
 What you need:
 
 - **Python 3.9+** for the client and the test suite. The CI matrix runs
-  Python 3.9 and 3.12 on Linux and macOS. If you do not have the required
+  Python 3.9 and 3.12 on Linux, macOS and Windows. The `g2h` client suite
+  (`tests/test_g2h.py`) is POSIX-only by design (it asserts 0600/0700 file
+  modes and uses symlinks) and skips as a whole module on Windows; the
+  Windows-relevant coverage is `tests/test_runalerts_sender.py`, which gates
+  platform behavior by `os.name`. If you do not have the required
   Python locally, you can skip straight to reading the CI run on your
   pull request.
 - **Linting** uses ruff; the CI pins the exact version (0.15.8). There are
-  no third-party runtime dependencies anywhere in the client; ruff is the
+  no third-party runtime dependencies anywhere in the client or the
+  `runalerts/` sender; ruff is the
   only dev-time tool you may want, so a throwaway virtualenv is enough:
 
 ```console
@@ -57,7 +62,7 @@ Lint, with the exact pinned ruff version CI installs:
 
 ```console
 $ python -m pip install "ruff==0.15.8"
-$ ruff check g2h.py tests/
+$ ruff check g2h.py runalerts/ tests/
 ```
 
 Tests, exactly as CI invokes them:
@@ -66,12 +71,9 @@ Tests, exactly as CI invokes them:
 $ python -m unittest discover -s tests -v
 ```
 
-Dash scan: the CI shell script byte-scans every tracked file and fails the
-build if any U+2014 (em dash) or U+2013 (en dash) appears anywhere,
-including inside SVG and draw.io label text. The check lives inline in
-`.github/workflows/ci.yml` under its "dash scan" step; there is nothing to
-install. If a reviewer asks you to avoid those characters, the CI rule is
-why.
+The dash byte scan is `python3 .github/scripts/dash_scan.py` (CI runs the
+same script; it fails on any U+2014 em dash or U+2013 en dash in a tracked
+file, including inside SVG and draw.io label text).
 
 Secrets scan: CI also runs a full-history gitleaks pass using the pinned
 gitleaks-action against its default ruleset, so new or historical secrets

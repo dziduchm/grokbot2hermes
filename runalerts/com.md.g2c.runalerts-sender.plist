@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  G2C run-approvals chat alert sender: launchd timer template (Marcin-only install).
+
+  Fill in every placeholder below (paths only), copy the filled file to
+  ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist and load it:
+
+      launchctl load ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist
+
+  Placeholders:
+    __SENDER_PYTHON__  absolute path to python3 (>= 3.9)
+    __SENDER_SCRIPT__  absolute path to runalerts/sender.py in this repo checkout
+    __LEDGER_PATH__    the SAME path as the gateway's HERMES_WEBAPP_RUN_ALERTS_OUTBOX
+    __LOG_PATH__       absolute path for the sender log, e.g.
+                       /Users/md/Library/Logs/com.md.g2c.runalerts-sender.log
+
+  The webhook file path is NOT stored here: the sender reads it from its default
+  location /Users/md/.bfc-pipeline/secrets/g2c-grokbot-webhook.json (mode 0600).
+  No secrets belong in this file, only paths.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.md.g2c.runalerts-sender</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SENDER_PYTHON__</string>
+        <string>__SENDER_SCRIPT__</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>G2C_RUNALERTS_LEDGER</key>
+        <string>__LEDGER_PATH__</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>15</integer>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_PATH__</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_PATH__</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

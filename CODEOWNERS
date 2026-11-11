@@ -1,0 +1,7 @@
+# CODEOWNERS
+# Reviews: everything needs Marcin. The sender package additionally needs a
+# second set of eyes before merge, because it is the only repo component that
+# talks to the network and holds a credential file path.
+*                                   @dziduchm
+/runalerts/                         @dziduchm
+/.github/workflows/                 @dziduchm

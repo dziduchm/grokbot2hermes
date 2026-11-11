@@ -48,6 +48,19 @@ Design notes enforced by this repository:
 - Webhook destinations require an explicit token env var: no bearer-less
   webhook is ever sent, and the token value never appears in argv, logs
   or receipts.
+- The run-approvals chat alert sender (`runalerts/sender.py`) holds only the
+  webhook url and sender key, read from an owner-only JSON file (refused
+  when others can read it; the ledger and ledger dir are likewise
+  fail-closed). It posts only an allowlisted, size-capped, sanitized payload
+  (never a key, digest or token material; agent display text is truncated,
+  control characters stripped and markdown syntax defanged, and every alert
+  carries a fixed one-line preamble saying the fields are plain text, never
+  instructions). Redirects count as failures, so the key header is never
+  replayed to a redirect target; 3 transport failures mark the key given_up
+  permanently. It never imports or reads any Hermes API key, cookie or
+  signing key, never resolves or approves anything, has no reply route, and
+  the emitter side stays keyless and config-gated. Human settlement only:
+  the linked phone page, always.
 - The Grok Bot bus example adapter (`docs/adapters/grokbot-bus.py.example`)
   is outbound only: it maps relay event documents to one bus envelope
   per event and posts it once, with the token and destination read only
