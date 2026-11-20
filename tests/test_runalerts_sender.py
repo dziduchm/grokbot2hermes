@@ -156,6 +156,9 @@ class SenderCase(unittest.TestCase):
         handler.captured = self.logs
         sender._log.addHandler(handler)
         self.capture_handler = handler
+        # Once-per-process notes must not leak across tests: clear the notes set
+        # so every test sees the first-call behaviour deterministically.
+        sender._WEBHOOK_KEY_NOTES_LOGGED.clear()
 
     def tearDown(self):
         sender._log.removeHandler(self.capture_handler)
@@ -867,6 +870,42 @@ class SenderCase(unittest.TestCase):
         self.assertNotIn(DUMMY_KEY, joined)
         self.assertTrue(any("normalized" in line for line in captured.output))
 
+    def test_normalization_note_logs_once_per_process(self):
+        # The pasted-shape INFO note is once per process, not once per call: a
+        # scheduled task loads the same webhook file four times a minute and
+        # must not repeat the note on every tick. The key value never appears.
+        sender._WEBHOOK_KEY_NOTES_LOGGED.clear()  # setUp already cleared; be explicit
+        self.addCleanup(sender._WEBHOOK_KEY_NOTES_LOGGED.clear)
+        path = self.webhook_file_raw(
+            "https://hook.example/x", "Authorization: Bearer " + DUMMY_KEY)
+        before = len(self.logs)
+        sender.load_webhook(path)
+        notes = [line for line in self.logs[before:] if "normalized" in line]
+        self.assertEqual(notes, ["sender: webhook: normalized a pasted full "
+                                 "header line in sender_key (key value not printed)"])
+        before = len(self.logs)
+        sender.load_webhook(path)  # same shape again in the same process: silent
+        self.assertEqual([line for line in self.logs[before:]
+                          if "normalized" in line], [])
+        self.assertNotIn(DUMMY_KEY, "\n".join(self.logs))
+
+    def test_normalize_webhook_key_notes_once_across_variants(self):
+        # Each distinct pasted shape notes exactly once per process, and the
+        # three shapes stay independent: two rounds of all three shapes add up
+        # to three notes, not six.
+        sender._WEBHOOK_KEY_NOTES_LOGGED.clear()  # setUp already cleared; be explicit
+        self.addCleanup(sender._WEBHOOK_KEY_NOTES_LOGGED.clear)
+        before = len(self.logs)
+        for _ in range(2):
+            sender._normalize_webhook_key(
+                "Authorization: Bearer " + DUMMY_KEY, "X-Sender-Key")
+            sender._normalize_webhook_key("Bearer " + DUMMY_KEY, "X-Sender-Key")
+            sender._normalize_webhook_key(
+                DUMMY_KEY, "Authorization: Bearer " + DUMMY_KEY)
+        notes = [line for line in self.logs[before:] if "normalized" in line]
+        self.assertEqual(len(notes), 3)
+        self.assertNotIn(DUMMY_KEY, "\n".join(notes))
+
     def test_key_with_interior_whitespace_is_refused_with_the_rule_line(self):
         self.write_ledger([approval_record()])
         server = CaptureServer()
@@ -1008,6 +1047,54 @@ class SenderCase(unittest.TestCase):
         self.assertEqual(counts["sent"], 1)
         self.assertEqual(len(server.requests), 1)
 
+    # --- ledger noise: a missing ledger is a quiet idle tick ---------------------
+
+    def test_missing_ledger_is_a_quiet_idle_tick(self):
+        # A ledger file that does not exist yet (stock Windows Hermes has no
+        # run-alerts emitter) is a quiet idle tick on both POSIX and Windows:
+        # nothing to classify on a missing path, so no privacy refusal, no log
+        # line at all, no POST, no ledger rewrite. A later emitter can still
+        # create the file; the next tick then applies the owner-only check to
+        # the real file.
+        missing_ledger = os.path.join(self.workdir, "absent", "alerts.jsonl")
+        server = CaptureServer()
+        try:
+            counts = sender.run_once(missing_ledger, self.webhook_file(server),
+                                     now=self.now())
+        finally:
+            server.stop()
+        self.assertEqual(counts, sender._zero_counts())
+        self.assertEqual(server.requests, [])  # the idle tick never POSTs
+        self.assertFalse(os.path.exists(missing_ledger))  # nothing was rewritten
+        self.assertEqual(self.logs, [])  # quiet: no refusal, no note, no warning
+
+    def test_main_with_missing_ledger_exits_zero_and_stays_quiet(self):
+        # The scheduled invocation shape: --ledger pointing at a file that does
+        # not exist yet exits 0 and logs nothing (in particular no "ledger
+        # privacy is unknown").
+        argv = ["--ledger", os.path.join(self.workdir, "none", "alerts.jsonl"),
+                "--webhook", self.webhook_file(url="https://hook.example/x")]
+        self.assertEqual(sender.main(argv), 0)
+        self.assertEqual(self.logs, [])
+
+    def test_owner_only_ledger_without_pending_stays_a_quiet_no_op(self):
+        # The privacy check still bites any EXISTING ledger file, but a clean
+        # owner-only one whose records are all settled stays a silent no-op.
+        self.write_ledger([approval_record(status="sent")])
+        before = open(self.ledger, encoding="utf-8").read()
+        server = CaptureServer()
+        try:
+            counts = sender.run_once(self.ledger, self.webhook_file(server),
+                                     now=self.now())
+        finally:
+            server.stop()
+        self.assertEqual(counts, sender._zero_counts())
+        self.assertEqual(server.requests, [])
+        self.assertEqual(open(self.ledger, encoding="utf-8").read(), before)
+        joined = "\n".join(self.logs)
+        self.assertNotIn("privacy is unknown", joined)
+        self.assertNotIn("readable by group or others", joined)
+
     # --- platform dispatch and Windows helpers ----------------------------------
 
     def test_lock_dispatch_uses_this_platforms_primitive(self):
@@ -1060,8 +1147,10 @@ class InstallerTaskDefinitionTest(unittest.TestCase):
     Scheduler repetition must stay exactly one minute (Task Scheduler rejects
     any sub-minute repetition interval, and the 15-second cadence belongs to
     the sender's own --tick-interval, which the interval scan never sees), and
-    the registered action must carry the multi-tick flags. Pure file reads:
-    nothing registers, nothing runs."""
+    the registered action must carry the multi-tick flags. The silent shape is
+    guarded too: pythonw.exe preferred next to python.exe, Hidden true, no
+    never-hidden documentation, schtasks /Delete uninstall fallback. Pure file
+    reads: nothing registers, nothing runs."""
 
     @staticmethod
     def installer_text() -> str:
@@ -1106,6 +1195,71 @@ class InstallerTaskDefinitionTest(unittest.TestCase):
         self.assertIn("--ticks 4", window)
         self.assertIn("--tick-interval 15", window)
         self.assertIn("--log-file", window)  # stdout is never collected
+
+    def test_registered_executable_prefers_pythonw_next_to_python_exe(self):
+        text = self.installer_text()
+        # The installer must resolve the sibling pythonw.exe (it opens no
+        # console window) instead of registering the filled python.exe path
+        # unchanged: the resolution looks for pythonw.exe next to python.exe.
+        self.assertIsNotNone(
+            re.search(r"Join-Path\s+\(Split-Path\s+-Parent\s+\$SenderPython\)\s+\"pythonw\.exe\"", text),
+            "the installer must look for pythonw.exe next to the filled python.exe")
+        # The registered action must not be the raw placeholder variable.
+        execute_match = re.search(r"-Execute\s+(\$[A-Za-z]\w*)", text)
+        assert execute_match is not None, \
+            "the task action must register the resolved interpreter variable"
+        self.assertNotEqual(execute_match.group(1), "$SenderPython",
+                            "the action must not register the raw $SenderPython placeholder")
+
+    def test_python_exe_fallback_warns_about_console_window(self):
+        text = self.installer_text().lower()
+        # Falling back to python.exe stays possible when pythonw.exe is
+        # missing, but only with an explicit console-window warning.
+        self.assertIn("console window", text)
+        self.assertIsNotNone(
+            re.search(r"may (appear|pop up)", text),
+            "the python.exe fallback must warn that a console window may appear each minute")
+
+    def test_task_settings_set_hidden_true(self):
+        text = self.installer_text()
+        self.assertIsNotNone(
+            re.search(r"\$\w+\.hidden\s*=\s*\$true", text, re.IGNORECASE),
+            "the scheduled task settings must set Hidden to $true")
+
+    def test_header_no_longer_claims_never_hidden(self):
+        text = self.installer_text()
+        # The old header said the task never runs hidden; a regression that
+        # re-documents the visible window must fail. Phrase forms may span
+        # lines, so match on whitespace-collapsed text too.
+        self.assertIsNone(
+            re.search(r"never\s+#?\s*runs\s+hidden|never\s+#?\s*hidden",
+                      re.sub(r"\s+", " ", text), re.IGNORECASE),
+            "the installer must no longer claim the task runs never hidden")
+        self.assertIsNone(
+            re.search(r"never[^\n]{0,40}hidden", text, re.IGNORECASE),
+            "no line may claim the task stays visible via a never-hidden wording")
+
+    def test_uninstall_falls_back_to_schtasks_delete(self):
+        text = self.installer_text()
+        # Unregister-ScheduledTask stays the primary path; on Access Denied
+        # (filtered admin / Medium IL session) the fallback is plain schtasks
+        # /Delete /F, implemented in the script and documented in the header.
+        self.assertIn("-Uninstall", text)
+        self.assertIn("Unregister-ScheduledTask", text)
+        fallback_lines = [line for line in text.splitlines()
+                          if re.search(r"schtasks(\.exe)?\s*/Delete", line, re.IGNORECASE)]
+        self.assertTrue(fallback_lines,
+                        "the schtasks /Delete fallback must be implemented or documented")
+        forced = [line for line in fallback_lines if "/F" in line]
+        self.assertTrue(forced, "the schtasks /Delete fallback must use /F")
+        self.assertTrue(
+            any("ComMdG2c.RunalertsSender" in line or "$TaskName" in line
+                for line in forced),
+            "the schtasks fallback must name the ComMdG2c.RunalertsSender task")
+        self.assertIn("catch", text,
+                      "the uninstall must catch the Unregister-ScheduledTask failure first")
+        self.assertIn("Access Denied", text,
+                      "the fallback must document the Access Denied case it covers")
 
 
 if __name__ == "__main__":

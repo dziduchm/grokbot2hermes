@@ -63,10 +63,14 @@ chat hand-off actually pastes: a full "Authorization: Bearer <key>" line in eith
 field, or a bare "Bearer <key>" value, are normalized onto the header name plus bare
 token; a key with interior whitespace or a malformed header name refuses with one line
 naming the field and rule (the key value itself is never logged). A webhook or ledger
-file readable by others fails closed.
+file readable by others fails closed, and so does an existing file whose privacy the
+platform cannot tell; a missing ledger file is a quiet idle tick instead (there is
+nothing to classify on a path that does not exist, and load_records already treats a
+missing file as an empty ledger) until the emitter creates it.
 
 Log lines are capped (LOG_LINE_CAP) and never contain the webhook url or sender key:
-argv carries paths and flags only.
+argv carries paths and flags only. Webhook-key normalization notes log once per
+process, not once per tick, so a scheduled multi-tick run does not repeat them.
 """
 import argparse
 import contextlib
@@ -335,6 +339,23 @@ def world_readable(path) -> Optional[bool]:
 # webhook file
 # ---------------------------------------------------------------------------
 
+# Webhook-key normalization notes log once per process (the same once-per-target
+# idea as _WINDOWS_TIGHTENED): a scheduled task loads the same webhook file on
+# every tick, and a per-call INFO line would repeat four times a minute there.
+# The key value never appears in any message.
+_WEBHOOK_KEY_NOTES_LOGGED: set = set()
+
+
+def _log_webhook_key_note(note_key: str, message: str) -> None:
+    """Log a webhook-key normalization note once per process: the first call with
+    *note_key* logs *message* at INFO, later same-shape calls stay silent (the
+    normalized shapes are valid configuration, not per-tick events)."""
+    if note_key in _WEBHOOK_KEY_NOTES_LOGGED:
+        return
+    _WEBHOOK_KEY_NOTES_LOGGED.add(note_key)
+    _log.info(capped(message))
+
+
 def _split_bearer(value: str) -> Tuple[str, str]:
     """A 'Bearer <token>' value: scheme + bare token. Any other value: no scheme."""
     match = re.match("bearer[ \\t]+(.+)$", value, re.IGNORECASE)
@@ -363,24 +384,30 @@ def _normalize_webhook_key(key: str, header: str) -> Tuple[str, str, str]:
         raw_header = name
         if rest:
             scheme, token = _split_bearer(rest)
-            _log.info(capped("sender: webhook: normalized a pasted full header line "
-                             "in key_header (key value not printed)"))
+            _log_webhook_key_note(
+                "header-line-in-key_header",
+                "sender: webhook: normalized a pasted full header line "
+                "in key_header (key value not printed)")
             return name, scheme, token
     # A full header line pasted into sender_key: 'Authorization: ...' (any case) or
     # '<Name>: Bearer ...'.
     auth_line = _AUTHORIZATION_LINE_RE.match(raw_key)
     if auth_line:
         scheme, token = _split_bearer(auth_line.group(1).strip())
-        _log.info(capped("sender: webhook: normalized a pasted full header line in "
-                         "sender_key (key value not printed)"))
+        _log_webhook_key_note(
+            "header-line-in-sender_key",
+            "sender: webhook: normalized a pasted full header line in "
+            "sender_key (key value not printed)")
         return "Authorization", scheme, token
     any_line = _ANY_HEADER_LINE_RE.match(raw_key)
     if any_line:
         name, value = any_line.group(1), any_line.group(2).strip()
         scheme, token = _split_bearer(value)
         if scheme == "Bearer":  # a Bearer-prefixed value: treat the whole as the line
-            _log.info(capped("sender: webhook: normalized a pasted full header line "
-                             "in sender_key (key value not printed)"))
+            _log_webhook_key_note(
+                "header-line-in-sender_key",
+                "sender: webhook: normalized a pasted full header line "
+                "in sender_key (key value not printed)")
             return name, scheme, token
     # A bare 'Bearer <key>' value: default to the Authorization header unless a real
     # override header name was configured.
@@ -390,8 +417,10 @@ def _normalize_webhook_key(key: str, header: str) -> Tuple[str, str, str]:
         if (raw_header and raw_header.lower() != DEFAULT_KEY_HEADER.lower()
                 and raw_header.lower() != "authorization"):
             target = raw_header
-        _log.info(capped("sender: webhook: normalized a Bearer-prefixed sender_key "
-                         "onto header " + target + " (key value not printed)"))
+        _log_webhook_key_note(
+            "bearer-prefixed-sender_key",
+            "sender: webhook: normalized a Bearer-prefixed sender_key "
+            "onto header " + target + " (key value not printed)")
         return target, "Bearer", bearer.group(1).strip()
     return raw_header, "", raw_key
 
@@ -806,16 +835,20 @@ def run_once(ledger, webhook_path, notify_closed: bool = False,
 def _run_locked(ledger: Path, webhook, notify_closed: bool, now: datetime) -> dict:
     """The gated body of run_once: the caller holds the cross-process ledger gate for
     this whole section (load, mutate, rewrite), so gateway appends cannot interleave
-    with status marks or the rewrite."""
-    readable = world_readable(ledger)
-    if readable is True:
-        log_event("sender: ledger is readable by group or others, "
-                  "refusing this tick")
-        return _zero_counts()
-    if readable is None:
-        log_event("sender: ledger privacy is unknown (the platform check could "
-                  "not tell), refusing this tick")
-        return _zero_counts()
+    with status marks or the rewrite. A ledger path that does not exist yet is a quiet
+    idle tick (load_records already returns an empty ledger there): the privacy checks
+    apply from the first tick after the emitter creates the file, and an existing file
+    whose privacy the platform cannot tell still refuses fail closed."""
+    if ledger.exists():
+        readable = world_readable(ledger)
+        if readable is True:
+            log_event("sender: ledger is readable by group or others, "
+                      "refusing this tick")
+            return _zero_counts()
+        if readable is None:
+            log_event("sender: ledger privacy is unknown (the platform check could "
+                      "not tell), refusing this tick")
+            return _zero_counts()
     records, _bad = load_records(ledger)
     pre_count = len(records)
     counts = _zero_counts()
