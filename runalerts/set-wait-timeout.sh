@@ -75,7 +75,7 @@ usage() {
     printf '                          leading zeros, 16+ digits; exit 2, nothing touched).\n'
     printf '                          Below 60 s phone taps cannot land in time; above\n'
     printf '                          24 h make a deliberate edit instead.\n'
-    printf '  --profiles a,b,c        bare profile ids, [a-z0-9-]+ (default: %s)\n' "$DEFAULT_PROFILES"
+    printf '  --profiles a,b,c        bare profile ids, [a-z0-9-]+, no leading dash (default: %s)\n' "$DEFAULT_PROFILES"
     printf '  --apply                 run the config sets (default: DRY RUN, prints the\n'
     printf '                          exact commands and touches nothing)\n'
     printf '  --state FILE            JSONL state file for --apply (default:\n'
@@ -117,7 +117,13 @@ validate_wait_timeout() {
 
 validate_profiles() {
     # Validates and rewrites $profiles into a cleaned comma list; dies on any
-    # bad or duplicate name.
+    # bad, dash-leading or duplicate name and on any empty item (a trailing
+    # comma would otherwise be silently dropped).
+    case "$profiles" in
+        *,)
+            die 2 "invalid profile name '' (empty item after the last comma in --profiles)"
+            ;;
+    esac
     cleaned=""
     rest="$profiles"
     while [ -n "$rest" ]; do
@@ -129,6 +135,9 @@ validate_profiles() {
             rest=$next
         fi
         case "$name" in
+            -*)
+                die 2 "profile name '$name' must not start with '-' (it could swallow the next option or reach hermes as a flag)"
+                ;;
             ''|*[!a-z0-9-]*)
                 die 2 "invalid profile name '$name' (allowed: [a-z0-9-]+)"
                 ;;
@@ -154,9 +163,16 @@ validate_profiles() {
 #   A            key ABSENT from the raw user layer (or no config file)
 #   V<number>    present, bare/quoted integer scalar <number>
 #   E<reason>    cannot decide -> the caller must fail closed
-# Only integer scalars one indent level under their top-level section count.
-# Flow style, nested blocks, empty-after-colon, non-numeric scalars, duplicate
-# keys or duplicate section headers all fail closed instead of guessing.
+# Only integer scalars at the direct-child indent of their top-level section
+# count: the FIRST content line under the header fixes the child indent and
+# the leaf must sit at exactly that indent. A leaf-shaped line at any other
+# indent is a different path (agent.sub.clarify_timeout must never be reported
+# as agent.clarify_timeout) and refuses; deeper content that never names the
+# leaf cannot change the direct-child decision and is skipped (real installs
+# nest maps under the target sections, e.g. agent.personalities). Flow style,
+# empty-after-colon, non-numeric scalars, duplicate keys or duplicate section
+# headers all fail closed instead of guessing. Alias/merge keys (<<, *, &)
+# are not consulted: they keep a known, inherited blind spot.
 raw_value_token() {
     p=$1
     sec=$2
@@ -167,12 +183,22 @@ raw_value_token() {
         return 0
     fi
     awk -v sec="$sec" -v leaf="$leaf" '
+        BEGIN { child_indent = -1 }
         {   line = $0
             sub(/\r$/, "", line)
-            if (line ~ /^---( |$)/) { ins = 0; next }
+            if (line ~ /^---( |$)/) { ins = 0; child_indent = -1; next }
+            # Comments and blank lines carry no mapping content: skip them so
+            # they can neither fix nor disturb the child indent, wherever they
+            # sit (a column-0 comment must not end the section either).
+            probe = line
+            sub(/^[ \t]+/, "", probe)
+            if (probe == "" || substr(probe, 1, 1) == "#") {
+                next
+            }
             if (line !~ /^[ \t]/ && line ~ /^[A-Za-z0-9_-]+[ \t]*:/) {
                 hdr = line
                 sub(/[ \t]*:.*/, "", hdr)
+                child_indent = -1
                 if (hdr == sec) {
                     nsec++
                     rem = line
@@ -204,6 +230,31 @@ raw_value_token() {
                     ins = 0
                 }
                 next
+            }
+            if (line !~ /^[ \t]/) {
+                # Top-level content that is not a recognized section header
+                # (dotted key, stray scalar): it ends the section block.
+                ins = 0
+                child_indent = -1
+                next
+            }
+            # Enforce the documented depth: the FIRST content line under the
+            # header fixes the direct-child indent; the leaf counts only at
+            # exactly that indent. A leaf-shaped line at any other indent is a
+            # different path and refuses (fail closed) rather than possibly
+            # reporting the wrong key. Deeper content that does not mention
+            # the leaf cannot change the direct-child decision - the child
+            # exists iff a leaf-shaped line sits at the child indent - so it
+            # is skipped (real installs nest maps under the sections).
+            if (ins) {
+                ind = 0
+                if (match(line, /^[ \t]+/)) ind = RLENGTH
+                if (child_indent == -1) child_indent = ind
+                if (ind != child_indent && line ~ ("^[ \t]+" leaf "[ \t]*:")) {
+                    print "E " sec "." leaf ": found at indent " ind " but the direct children of " sec " sit at indent " child_indent " - a nested " leaf " is not the " sec "." leaf " value; cannot decide, refusing fail closed"
+                    bad = 1
+                    exit 1
+                }
             }
             if (ins && line ~ ("^[ \t]+" leaf "[ \t]*:")) {
                 if (done) {
@@ -349,6 +400,21 @@ verify_get() {
 # --- apply --------------------------------------------------------------------
 
 cmd_apply() {
+    # L2: a typo in --profiles would make hermes config set CREATE a junk
+    # profile dir on the first call; refuse the whole batch up front (before
+    # anything is recorded or set) when a named profile dir is missing.
+    missing=""
+    IFS_backup=$IFS
+    IFS=,
+    for p in $profiles; do
+        IFS=$IFS_backup
+        if [ ! -d "$PROFILE_ROOT/$p" ]; then
+            missing="$missing $p"
+        fi
+    done
+    if [ -n "$missing" ]; then
+        die 1 "profile dir(s) missing under $PROFILE_ROOT:$missing (hermes config set would create a junk profile for a typo) - create the profile dir(s) first or fix --profiles"
+    fi
     # Pass 1: read every prior BEFORE touching anything; build the state file
     # content in a temp file; refuse the whole batch on any legacy key (unless
     # --also-legacy) or on any undecidable raw value.
@@ -359,7 +425,12 @@ cmd_apply() {
         rm -f "$tmp_state" "$tmp_check"
     }
     trap cleanup EXIT
+    # N4: the pre-copy temp holds the same content as the state file; write it
+    # private (umask 077) instead of with the ambient default, then restore.
+    umask_was=$(umask)
+    umask 077
     printf '{"kind": "%s", "created_utc": "%s", "wait_timeout": %s}\n' "$STATE_KIND" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$wait_timeout" > "$tmp_state" || die 1 "cannot write the temp state file $tmp_state"
+    umask "$umask_was"
     legacy_offenders=0
     IFS_backup=$IFS
     IFS=,
@@ -448,6 +519,15 @@ parse_state_line() {
 
 cmd_rollback() {
     printf 'rollback from: %s\n' "$rollback_file"
+    # N2: a state file whose last line has no newline was truncated mid-write;
+    # the read loop would silently restore one record less than was recorded.
+    # Refuse before touching anything.
+    if [ -s "$rollback_file" ]; then
+        lastbyte=$(tail -c 1 "$rollback_file")
+        if [ -n "$lastbyte" ]; then
+            die 1 "state file is incomplete: the last line does not end with a newline (truncated?): $rollback_file - refusing: an incomplete rollback is worse than none"
+        fi
+    fi
     ok=0
     lineno=0
     while IFS= read -r line; do
@@ -507,6 +587,10 @@ cmd_dry_run() {
     IFS=,
     for p in $profiles; do
         IFS=$IFS_backup
+        if [ ! -d "$PROFILE_ROOT/$p" ]; then
+            printf '    %-14s profile dir missing: %s\n' "$p" "$PROFILE_ROOT/$p"
+            continue
+        fi
         c=$(read_prior "$p" "$KEY_CLARIFY" "$KEY_CLARIFY") || exit 1
         a=$(read_prior "$p" "$KEY_APPROVALS" "$KEY_APPROVALS") || exit 1
         l=$(read_prior "$p" "legacy $KEY_LEGACY" "$KEY_LEGACY") || exit 1

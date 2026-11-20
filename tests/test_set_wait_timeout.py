@@ -5,7 +5,9 @@ records every call into a JSONL log and simulates `config get|set|unset` with
 per-profile state in a throwaway dir, so nothing touches the real Hermes
 install. The profile fixtures are throwaway config.yaml files under a temp
 profile root (G2C_PROFILE_ROOT, HOME), covering bare integers, quoted scalars,
-inline comments, a legacy `clarify.timeout` key and fully unset profiles.
+inline comments, a legacy `clarify.timeout` key, fully unset profiles, a
+four-space child indent, and nested/deeper-indent shapes the raw reader
+must refuse.
 
 The module is unittest-compatible on purpose: the repo's CI runs the stdlib
 unittest suite, so it stays importable without pytest. pytest runs it fine
@@ -74,6 +76,33 @@ PROFILE_FLOW_EMPTY = "# flow fixture: empty agent map, plain approvals\nagent: {
 PROFILE_FLOW_LEAF = (
     "# flow fixture: leaf named inside the flow map\n"
     "agent: {clarify_timeout: 90}\n"
+)
+PROFILE_DEEP_LEAF = (
+    "# broken fixture: the leaf sits deeper than the direct children\n"
+    "agent:\n"
+    "  sub:\n"
+    "    clarify_timeout: 90\n"
+)
+PROFILE_DEEP_BLOCK = (
+    "# nested-block fixture: a map opens under the section but never names the leaf\n"
+    "approvals:\n"
+    "  sub:\n"
+    "    x: 1\n"
+)
+PROFILE_NESTED_WITH_SIBLING_LEAF = (
+    "# real-coder shape: nested map plus a direct sibling leaf at child indent\n"
+    "agent:\n"
+    "  personalities:\n"
+    "    helpful: You are helpful.\n"
+    "    concise: Keep it brief.\n"
+    "  clarify_timeout: 84\n"
+)
+PROFILE_INDENT4 = (
+    "# four-space children fixture: the first child fixes the child indent\n"
+    "agent:\n"
+    "    clarify_timeout: 71\n"
+    "approvals:\n"
+    "    timeout: 700\n"
 )
 
 FAKE_HERMES_SOURCE = """#!/usr/bin/env python3
@@ -272,6 +301,43 @@ class TestSetWaitTimeout(unittest.TestCase):
         self.assertIn("imilk", self._last_out)
         self.assertIn("researcher", self._last_out)
 
+    def test_dry_run_refuses_a_leaf_deeper_than_the_children(self):
+        self.write_profile("solo", PROFILE_DEEP_LEAF)
+        rc = self.run_script(["--profiles", "solo"])
+        self.assertEqual(rc, 1, self._last_err)
+        self.assertIn("refusing fail closed", self._last_err)
+        self.assertIn("direct children", self._last_err)
+        self.assert_no_calls()
+
+    def test_nested_block_without_the_leaf_leaves_the_key_absent(self):
+        # The real four-profile installs nest maps under the target sections
+        # (e.g. coder's agent.personalities) and the brief pins the real dry
+        # run as byte-identical: nested content not naming the leaf proves
+        # nothing against the direct child, so it stays ignored. A nested
+        # LEAF is still refused (see the deeper-leaf tests below).
+        self.write_profile("solo", PROFILE_DEEP_BLOCK)
+        rc = self.run_script(["--profiles", "solo"])
+        self.assertEqual(rc, 0, self._last_err)
+        self.assertIn("approvals.timeout=(unset)", self._last_out)
+        self.assert_no_calls()
+
+    def test_nested_map_with_a_direct_sibling_leaf_counts_the_leaf(self):
+        # The exact shape of the current real coder profile: a nested map
+        # under the section plus the leaf as a direct child at the child
+        # indent; the sibling leaf must still be read.
+        self.write_profile("solo", PROFILE_NESTED_WITH_SIBLING_LEAF)
+        rc = self.run_script(["--profiles", "solo"])
+        self.assertEqual(rc, 0, self._last_err)
+        self.assertIn("agent.clarify_timeout=84", self._last_out)
+        self.assert_no_calls()
+
+    def test_children_at_the_first_child_indent_still_count(self):
+        self.write_profile("solo", PROFILE_INDENT4)
+        rc = self.run_script(["--profiles", "solo"])
+        self.assertEqual(rc, 0, self._last_err)
+        self.assertIn("agent.clarify_timeout=71", self._last_out)
+        self.assertIn("approvals.timeout=700", self._last_out)
+
     # apply -------------------------------------------------------------------
 
     def test_apply_with_also_legacy_sets_verifies_and_records(self):
@@ -332,6 +398,26 @@ class TestSetWaitTimeout(unittest.TestCase):
             self.assertIn("FAIL", self._last_err)
         self.assert_no_calls()
 
+    def test_profiles_starting_with_a_dash_are_rejected(self):
+        self.write_default_profiles()
+        rc = self.run_script(["--profiles", "--apply"])
+        self.assertEqual(rc, 2, self._last_err)
+        self.assertIn("must not start with '-'", self._last_err)
+        self.assert_no_calls()
+        rc = self.run_script(["--apply", "--profiles", "--apply"])
+        self.assertEqual(rc, 2, self._last_err)
+        self.assert_no_calls()
+        rc = self.run_script(["--apply", "--profiles", "coder,--imilk"])
+        self.assertEqual(rc, 2, self._last_err)
+        self.assert_no_calls()
+
+    def test_empty_profile_item_from_a_trailing_comma_is_rejected(self):
+        self.write_default_profiles()
+        rc = self.run_script(["--apply", "--profiles", "code-reviewer,"])
+        self.assertEqual(rc, 2, self._last_err)
+        self.assertIn("invalid profile name ''", self._last_err)
+        self.assert_no_calls()
+
     def test_state_flag_without_apply_is_rejected(self):
         self.write_default_profiles()
         rc = self.run_script(["--state", os.path.join(self.tmp, "s.jsonl")])
@@ -349,6 +435,14 @@ class TestSetWaitTimeout(unittest.TestCase):
         rc = self.run_script(["--apply", "--profiles", "solo"])
         self.assertEqual(rc, 1)
         self.assertIn("nothing after the colon", self._last_err)
+
+    def test_apply_refuses_a_leaf_deeper_than_the_children(self):
+        self.write_profile("solo", PROFILE_DEEP_LEAF)
+        state_path = os.path.join(self.tmp, "state.jsonl")
+        rc = self.run_script(["--apply", "--profiles", "solo", "--state", state_path])
+        self.assertEqual(rc, 1, self._last_err)
+        self.assert_no_calls()
+        self.assertFalse(os.path.exists(state_path))
 
     def test_empty_flow_section_counts_as_absent(self):
         self.write_profile("solo", PROFILE_FLOW_EMPTY)
@@ -368,23 +462,40 @@ class TestSetWaitTimeout(unittest.TestCase):
         self.assertIn("flow section value mentions", self._last_err)
         self.assert_no_calls()
 
-    def test_custom_profile_list_works_with_a_missing_profile_dir(self):
+    def test_apply_refuses_a_missing_profile_dir(self):
         self.write_profile("alpha", PROFILE_ALPHA)
         state_path = os.path.join(self.tmp, "state.jsonl")
-        rc = self.run_script(["--apply", "--profiles", "alpha,b-1", "--state", state_path])
+        rc = self.run_script(["--apply", "--profiles", "alpha,missing-p", "--state", state_path])
+        self.assertEqual(rc, 1, self._last_err)
+        self.assertIn("profile dir", self._last_err)
+        self.assertIn("missing-p", self._last_err)
+        self.assert_no_calls()
+        self.assertFalse(os.path.exists(state_path))
+        rc = self.run_script(["--profiles", "alpha,missing-p"])
+        self.assertEqual(rc, 0, self._last_err)
+        self.assertIn("profile dir missing", self._last_out)
+        self.assertIn("agent.clarify_timeout=30", self._last_out)
+
+    def test_custom_profile_list_applies_when_all_profile_dirs_exist(self):
+        self.write_profile("alpha", PROFILE_ALPHA)
+        self.write_profile("b-2", PROFILE_IMILK)
+        state_path = os.path.join(self.tmp, "state.jsonl")
+        rc = self.run_script(["--apply", "--profiles", "alpha,b-2", "--state", state_path])
         self.assertEqual(rc, 0, self._last_err)
         calls = self.calls()
         self.assertEqual(profile_ops(calls, "alpha", "set", KEY_CLARIFY), ["600"])
-        self.assertEqual(profile_ops(calls, "b-1", "set", KEY_CLARIFY), ["600"])
+        self.assertEqual(profile_ops(calls, "b-2", "set", KEY_APPROVALS), ["600"])
         self.assertEqual(profile_ops(calls, "coder", "set", KEY_CLARIFY), [],
                          "only the named profiles get touched")
+        self.assertEqual(profile_ops(calls, "b-1", "set", KEY_CLARIFY), [],
+                         "a profile never named is never touched")
         self.state_path = state_path
         _, records = self.read_state_records()
         self.assertEqual(records, [
             ("alpha", KEY_CLARIFY, "30"),
             ("alpha", KEY_APPROVALS, "300"),
-            ("b-1", KEY_CLARIFY, None),
-            ("b-1", KEY_APPROVALS, None),
+            ("b-2", KEY_CLARIFY, None),
+            ("b-2", KEY_APPROVALS, None),
         ])
 
     # rollback ----------------------------------------------------------------
@@ -443,6 +554,17 @@ class TestSetWaitTimeout(unittest.TestCase):
         rc = self.run_script(["--rollback", self.state_path])
         self.assertEqual(rc, 1)
         self.assertIn("not understood", self._last_err)
+
+    def test_rollback_refuses_a_state_file_without_a_final_newline(self):
+        self.state_path = os.path.join(self.tmp, "truncated.jsonl")
+        with open(self.state_path, "w", encoding="utf-8") as fh:
+            fh.write('{"kind": "g2c-wait-timeout-state", "created_utc": '
+                     '"2026-11-20T10:00:00Z", "wait_timeout": 600}\n')
+            fh.write('{"profile": "solo", "key": "agent.clarify_timeout", "prior": 1}')
+        rc = self.run_script(["--rollback", self.state_path])
+        self.assertEqual(rc, 1)
+        self.assertIn("does not end with a newline", self._last_err)
+        self.assert_no_calls()
 
     def test_rollback_rejects_conflicting_flags(self):
         path = os.path.join(self.tmp, "state.jsonl")
