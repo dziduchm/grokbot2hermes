@@ -60,6 +60,21 @@ Added:
 - Repo plumbing: pyproject metadata (no runtime deps, not pip-installable),
   GitHub issue and PR templates, CODEOWNERS, a pre-commit config, badges.
 
+Changed:
+
+- A missing ledger file is a quiet idle tick instead of a privacy refusal:
+  there is nothing to classify on a path that does not exist, and the loader
+  already treats a missing file as an empty ledger, so the tick stays silent
+  and POSTs nothing until the emitter creates the file. The owner-only and
+  fail-closed privacy checks then apply to the real file from the first tick
+  after it exists, and a file that exists but whose privacy the platform
+  cannot tell still refuses with the same log line as before.
+- Webhook-key normalization notes (a pasted full header line or a
+  Bearer-prefixed sender_key accepted) log once per process instead of once
+  per call: a scheduled multi-tick task that loads the same webhook file no
+  longer repeats the note four times a minute. The key value is still never
+  logged.
+
 Security in this release, unchanged from design (see SECURITY.md):
 human-only settlement, https-required webhooks outside loopback, redirect
 refusal so the key is never replayed, fail-closed credential-file privacy

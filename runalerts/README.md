@@ -132,7 +132,8 @@ A pasted full line is accepted and normalized: `sender_key` may be
 `Bearer <key>` or a whole `Authorization: Bearer <key>` line, and either field
 may carry the line that names the header. A key with interior whitespace or a
 malformed header name refuses with an explanatory line (the key value is
-never logged).
+never logged). The acceptance note for a normalized shape logs once per
+process, not on every tick of a multi-tick schedule.
 
 Windows: the sender's default webhook path is `%APPDATA%\G2C\g2c-grokbot-webhook.json`
 (or pass `--webhook`). Place it in a directory only the current user can enter
@@ -145,6 +146,9 @@ can read (0600 on POSIX: the macOS staff group alone spans every local
 account; on Windows it checks the ACL the PowerShell-independent way it
 can). An inconclusive check refuses too: fail closed when the platform
 cannot tell (the file lives under a private profile directory either way).
+A ledger path that does not exist yet is a quiet idle tick instead (there
+is nothing to classify on a missing path), and the same check applies to
+the real file from the first tick after the emitter creates it.
 
 ## Step 4: schedule the sender (pick the platform's section)
 
