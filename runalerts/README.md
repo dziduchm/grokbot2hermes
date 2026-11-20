@@ -240,6 +240,55 @@ using only the webhook file: if the routine received it, url, key and wiring are
 good. Exit code 0 on success, 1 on failure. The ledger is never touched by the
 self-test (no `--ledger` argument exists on that path).
 
+## Wait timeout (the alert-to-tap window)
+
+When an alert reaches the phone, the pending question or approval waiter it
+describes has a bounded answer window, set per profile by two config keys,
+read at every waiter creation through the signature-cached config loader:
+
+| Key                    | What it bounds            | Default | Resolved by |
+|------------------------|---------------------------|---------|-------------|
+| `agent.clarify_timeout`| clarify question window   | 90s     | `tools/clarify_gateway.py` (`resolve_clarify_timeout`: legacy `clarify.timeout` wins if set, else `agent.clarify_timeout`, else 90; <= 0 unlimited) |
+| `approvals.timeout`    | approval card window      | 300s    | `tools/approval_context.py` (`_get_approval_timeout`, clamped to `agent.deadline.MAX_SAFE_TIMEOUT_S`) |
+
+`runalerts/set-wait-timeout.sh` points BOTH keys of the G2C profiles at one
+value (default 600s), with a fail-closed prior-value record and a rollback. It
+never edits a config file itself: every write goes through
+`hermes -p <p> config set|unset`, verified per profile with `config get`.
+
+    bash runalerts/set-wait-timeout.sh --wait-timeout 900 --apply
+    bash runalerts/set-wait-timeout.sh --rollback ~/.bfc-pipeline/run/g2c/wait-timeout-state-<stamp>.jsonl
+
+Defaults: profiles `coder,code-reviewer,imilk,researcher`; valid range
+60..86400 seconds (below 60 s the phone taps cannot land in time; above 24 h
+make a deliberate edit instead). A profile that still sets the legacy
+`clarify.timeout` key makes the run refuse (`--also-legacy` to point that key
+at the same value too; the unset ones are left to `agent.clarify_timeout`).
+Run it without `--apply` for a dry run: it prints the prior values (read from
+the profiles' raw `config.yaml`, so seeded defaults are not mistaken for
+user-set ones) and the exact commands. Exit codes: 0 ok, 1 refusal/failure,
+2 invalid input.
+
+Restart answer: NO gateway restart is needed after `config set`/`--rollback`.
+Both resolvers load the profile config per waiter creation; the loader's cache
+is keyed by the file signature (stat + content digest) in
+`hermes_cli/config_backend.py`, so the next waiter picks up the new value
+while waiters created before the change keep the window they were born with.
+That also means a rollback only affects waiters created after it: if phone
+taps failed during the temporary window, those agents still need a manual
+resolve after the rollback.
+
+Windows: this round ships the bash script plus this parity note (no .ps1
+port). Equivalent manual commands per profile (then verify with get):
+
+    hermes -p coder config set agent.clarify_timeout 600
+    hermes -p coder config set approvals.timeout 600
+    hermes -p coder config get agent.clarify_timeout
+    hermes -p coder config get approvals.timeout
+
+(or run `runalerts/set-wait-timeout.sh` under Git Bash/WSL, which macOS and
+Linux use directly; the script's awk/sed usage is POSIX).
+
 ## Rollback
 
 - Stop the sender on macOS: `launchctl unload

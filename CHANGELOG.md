@@ -59,6 +59,26 @@ Added:
   cross-platform coverage in `tests/test_runalerts_sender.py`.
 - Repo plumbing: pyproject metadata (no runtime deps, not pip-installable),
   GitHub issue and PR templates, CODEOWNERS, a pre-commit config, badges.
+- Wait timeout installer: `runalerts/set-wait-timeout.sh` points the two answer
+  windows of the G2C profiles (`agent.clarify_timeout`, `approvals.timeout`) at
+  one value (default 600s, valid 60..86400). Dry run by default (prints prior
+  values read from each profile's raw `config.yaml` plus the exact commands);
+  `--apply` writes via `hermes -p <p> config set` only, verifies each profile
+  with `config get`, and records per-profile prior values (null = was unset) in
+  a 0600 JSONL state file for `--rollback` (`config set` for recorded values,
+  `config unset` for nulls, "already unset" tolerated). Refusals: invalid
+  numeric input or lists (exit 2, nothing touched), a profile still carrying
+  the legacy `clarify.timeout` key (it overrides `agent.clarify_timeout`;
+  `--also-legacy` points it at the same value too), undecidable prior values
+  (flow/nested/duplicate/non-scalar in the raw layer, fail closed), state file
+  overwrite. No gateway restart is needed: both resolvers load the profile
+  config per waiter creation and the loader cache is signature-keyed
+  (stat + content digest); waiters created before a change keep their window.
+  POSIX/bash-3.2, bash-echoed every write; documented in the runalerts README
+  ("Wait timeout") and covered by `tests/test_set_wait_timeout.py` (18 tests,
+  unittest-compatible, fake-hermes stub, POSIX legs). Windows parity this
+  round is a README note with the equivalent per-profile `hermes config set`
+  commands instead of a .ps1 port.
 
 Changed:
 
