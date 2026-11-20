@@ -188,7 +188,38 @@ regular (non-admin) PowerShell window in the repo checkout:
     setx G2C_RUNALERTS_LEDGER "C:\path\to\alerts.jsonl"
     powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1
 
+How the task stays silent: the installer registers pythonw.exe as the
+executable whenever pythonw.exe sits next to the filled python.exe placeholder
+(a filled pythonw.exe path is used as-is; any other interpreter passes through
+unchanged), because pythonw.exe opens no console window on a scheduled run.
+When pythonw.exe is missing it falls back to the filled python.exe and prints
+a warning that a console window may appear each minute. The task is registered
+Hidden as well, which hides it in the Task Scheduler UI tree; pythonw.exe is
+what suppresses the console window, so both are required. Re-running the
+installer keeps the silent shape: it registers no visible-window task.
+
+Pin provenance (documentation only, recommended): a pinned sender copy drifts
+from the repo checkout, so when you pin sender.py on the Windows box, write a
+provenance file next to the pinned sender.py, e.g. `PIN.txt`, containing the
+git commit SHA and the sha256 of that sender.py (and optionally the installer
+ps1):
+
+    git rev-parse HEAD
+    certutil -hashfile C:\path\to\sender.py SHA256
+    certutil -hashfile C:\path\to\install-task-windows.ps1 SHA256
+
+Write those values plus the date into `PIN.txt`. Nothing in this repo reads or
+writes `PIN.txt`, and no tooling here reaches the machine; the file only makes
+a stale pin identifiable later.
+
 Remove: `powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -Uninstall`
+
+If `Unregister-ScheduledTask` is refused with Access Denied (seen in a filtered
+admin / Medium IL session), delete the task from the same session:
+
+    schtasks /Delete /TN ComMdG2c.RunalertsSender /F
+
+That removes the task only; the ledger, the webhook file and the logs stay.
 
 How the cadence works on Windows: the task trigger repeats every 1 minute
 (Task Scheduler rejects any sub-minute repetition interval, such as a
@@ -214,7 +245,9 @@ self-test (no `--ledger` argument exists on that path).
 - Stop the sender on macOS: `launchctl unload
   ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist` and delete the
   plist from `~/Library/LaunchAgents`. On Windows:
-  `powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -Uninstall`.
+  `powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -Uninstall`,
+  and when that is refused with Access Denied, `schtasks /Delete /TN ComMdG2c.RunalertsSender /F`
+  removes the task only (ledger, webhook file and logs stay).
   On Linux: remove the crontab line or `systemctl --user disable --now` the
   timer unit.
 - Turn the emitter off: remove the `webapp.run_alerts` block from the gateway's

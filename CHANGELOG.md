@@ -74,6 +74,16 @@ Changed:
   per call: a scheduled multi-tick task that loads the same webhook file no
   longer repeats the note four times a minute. The key value is still never
   logged.
+- Windows installer silence: `install-task-windows.ps1` prefers pythonw.exe
+  (the sibling next to the filled python.exe; a filled pythonw.exe path passes
+  through, and the python.exe fallback keeps an explicit console-window
+  warning when pythonw.exe is missing) and registers the per-user task Hidden
+  (Task Scheduler UI visibility; pythonw.exe suppresses the console window,
+  both required). The installer header documents that silent shape, and the
+  uninstall gains a schtasks /Delete fallback (`schtasks /Delete /TN ComMdG2c.RunalertsSender /F`)
+  when `Unregister-ScheduledTask` is refused with Access Denied (filtered
+  admin / Medium IL session). Static installer tests fail a regression to the
+  visible python.exe-only shape.
 
 Security in this release, unchanged from design (see SECURITY.md):
 human-only settlement, https-required webhooks outside loopback, redirect

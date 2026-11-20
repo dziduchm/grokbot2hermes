@@ -1147,8 +1147,10 @@ class InstallerTaskDefinitionTest(unittest.TestCase):
     Scheduler repetition must stay exactly one minute (Task Scheduler rejects
     any sub-minute repetition interval, and the 15-second cadence belongs to
     the sender's own --tick-interval, which the interval scan never sees), and
-    the registered action must carry the multi-tick flags. Pure file reads:
-    nothing registers, nothing runs."""
+    the registered action must carry the multi-tick flags. The silent shape is
+    guarded too: pythonw.exe preferred next to python.exe, Hidden true, no
+    never-hidden documentation, schtasks /Delete uninstall fallback. Pure file
+    reads: nothing registers, nothing runs."""
 
     @staticmethod
     def installer_text() -> str:
@@ -1193,6 +1195,71 @@ class InstallerTaskDefinitionTest(unittest.TestCase):
         self.assertIn("--ticks 4", window)
         self.assertIn("--tick-interval 15", window)
         self.assertIn("--log-file", window)  # stdout is never collected
+
+    def test_registered_executable_prefers_pythonw_next_to_python_exe(self):
+        text = self.installer_text()
+        # The installer must resolve the sibling pythonw.exe (it opens no
+        # console window) instead of registering the filled python.exe path
+        # unchanged: the resolution looks for pythonw.exe next to python.exe.
+        self.assertIsNotNone(
+            re.search(r"Join-Path\s+\(Split-Path\s+-Parent\s+\$SenderPython\)\s+\"pythonw\.exe\"", text),
+            "the installer must look for pythonw.exe next to the filled python.exe")
+        # The registered action must not be the raw placeholder variable.
+        execute_match = re.search(r"-Execute\s+(\$[A-Za-z]\w*)", text)
+        assert execute_match is not None, \
+            "the task action must register the resolved interpreter variable"
+        self.assertNotEqual(execute_match.group(1), "$SenderPython",
+                            "the action must not register the raw $SenderPython placeholder")
+
+    def test_python_exe_fallback_warns_about_console_window(self):
+        text = self.installer_text().lower()
+        # Falling back to python.exe stays possible when pythonw.exe is
+        # missing, but only with an explicit console-window warning.
+        self.assertIn("console window", text)
+        self.assertIsNotNone(
+            re.search(r"may (appear|pop up)", text),
+            "the python.exe fallback must warn that a console window may appear each minute")
+
+    def test_task_settings_set_hidden_true(self):
+        text = self.installer_text()
+        self.assertIsNotNone(
+            re.search(r"\$\w+\.hidden\s*=\s*\$true", text, re.IGNORECASE),
+            "the scheduled task settings must set Hidden to $true")
+
+    def test_header_no_longer_claims_never_hidden(self):
+        text = self.installer_text()
+        # The old header said the task never runs hidden; a regression that
+        # re-documents the visible window must fail. Phrase forms may span
+        # lines, so match on whitespace-collapsed text too.
+        self.assertIsNone(
+            re.search(r"never\s+#?\s*runs\s+hidden|never\s+#?\s*hidden",
+                      re.sub(r"\s+", " ", text), re.IGNORECASE),
+            "the installer must no longer claim the task runs never hidden")
+        self.assertIsNone(
+            re.search(r"never[^\n]{0,40}hidden", text, re.IGNORECASE),
+            "no line may claim the task stays visible via a never-hidden wording")
+
+    def test_uninstall_falls_back_to_schtasks_delete(self):
+        text = self.installer_text()
+        # Unregister-ScheduledTask stays the primary path; on Access Denied
+        # (filtered admin / Medium IL session) the fallback is plain schtasks
+        # /Delete /F, implemented in the script and documented in the header.
+        self.assertIn("-Uninstall", text)
+        self.assertIn("Unregister-ScheduledTask", text)
+        fallback_lines = [line for line in text.splitlines()
+                          if re.search(r"schtasks(\.exe)?\s*/Delete", line, re.IGNORECASE)]
+        self.assertTrue(fallback_lines,
+                        "the schtasks /Delete fallback must be implemented or documented")
+        forced = [line for line in fallback_lines if "/F" in line]
+        self.assertTrue(forced, "the schtasks /Delete fallback must use /F")
+        self.assertTrue(
+            any("ComMdG2c.RunalertsSender" in line or "$TaskName" in line
+                for line in forced),
+            "the schtasks fallback must name the ComMdG2c.RunalertsSender task")
+        self.assertIn("catch", text,
+                      "the uninstall must catch the Unregister-ScheduledTask failure first")
+        self.assertIn("Access Denied", text,
+                      "the fallback must document the Access Denied case it covers")
 
 
 if __name__ == "__main__":
