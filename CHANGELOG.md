@@ -5,6 +5,26 @@ releases to package indexes; versions track the documented contracts).
 
 ## Unreleased (public repo cleanup: no owner-specific paths or hosts in the repo)
 
+Added:
+
+- `runalerts/set-wait-timeout.ps1`: the Windows port of the wait timeout
+  installer (PowerShell 5.1 compatible, no pwsh 7-only syntax). Same
+  behaviour and safety as the .sh: dry run by default, fail-closed raw-layer
+  prior reader (the same line-based block YAML semantics), state JSONL first
+  (same schema and kind, private to the user), writes only via
+  `hermes config set|unset|get` with per-profile verification, and the same
+  legacy `clarify.timeout` guard. Windows differences documented in
+  runalerts/README.md: the Hermes home resolves from `HERMES_HOME` or
+  `%LOCALAPPDATA%\hermes`; the `default` profile is called without `-p` and
+  reads its config from the home root; the hermes binary is `$env:HERMES_BIN`
+  or `hermes.exe` resolved with `Get-Command -CommandType Application` (a
+  bare `hermes` can resolve to a non-exe launcher script); the default state
+  dir is `%LOCALAPPDATA%\G2C` (`G2C_STATE_DIR` overrides for sandboxes). The
+  ps1 refuses a batch when a profile's own config.yaml is missing (the .sh
+  guards the profile dir only). Tests `tests/test_set_wait_timeout_ps1.py`
+  drive the real ps1 with a fake hermes stub, skip when no PowerShell is
+  found, and run in CI on ubuntu, macos and windows.
+
 Changed:
 
 - Documentation placeholders: the runalerts README and the launchd plist

@@ -265,10 +265,12 @@ read at every waiter creation through the signature-cached config loader:
 | `agent.clarify_timeout`| clarify question window   | 90s     | `tools/clarify_gateway.py` (`resolve_clarify_timeout`: legacy `clarify.timeout` wins if set, else `agent.clarify_timeout`, else 90; <= 0 unlimited) |
 | `approvals.timeout`    | approval card window      | 300s    | `tools/approval_context.py` (`_get_approval_timeout`, clamped to `agent.deadline.MAX_SAFE_TIMEOUT_S`) |
 
-`runalerts/set-wait-timeout.sh` points BOTH keys of the G2C profiles at one
-value (default 600s), with a fail-closed prior-value record and a rollback. It
-never edits a config file itself: every write goes through
-`hermes -p <p> config set|unset`, verified per profile with `config get`.
+`runalerts/set-wait-timeout.sh` (macOS/Linux) and
+`runalerts/set-wait-timeout.ps1` (Windows) point BOTH keys of the G2C
+profiles at one value (default 600s), with a fail-closed prior-value record
+and a rollback. Neither script edits a config file itself: every write goes
+through `hermes config set|unset` (named profiles with `-p <p>`), verified
+per profile with `config get`.
 
     bash runalerts/set-wait-timeout.sh --wait-timeout 900 --apply
     bash runalerts/set-wait-timeout.sh --rollback ~/.bfc-pipeline/run/g2c/wait-timeout-state-<stamp>.jsonl
@@ -300,16 +302,46 @@ That also means a rollback only affects waiters created after it: if phone
 taps failed during the temporary window, those agents still need a manual
 resolve after the rollback.
 
-Windows: this round ships the bash script plus this parity note (no .ps1
-port). Equivalent manual commands per profile (then verify with get):
+Windows: `runalerts/set-wait-timeout.ps1` is the Windows port (PowerShell 5.1
+compatible, no pwsh 7-only syntax; same behaviour, safety posture and exit
+codes as the .sh). Windows Hermes today runs the `default` profile, whose
+config lives in the Hermes home root (`%LOCALAPPDATA%\hermes\config.yaml`;
+`HERMES_HOME` overrides the home), and it is managed WITHOUT `-p`:
 
-    hermes -p coder config set agent.clarify_timeout 600
-    hermes -p coder config set approvals.timeout 600
-    hermes -p coder config get agent.clarify_timeout
-    hermes -p coder config get approvals.timeout
+    powershell -ExecutionPolicy Bypass -File runalerts\set-wait-timeout.ps1
+    powershell -ExecutionPolicy Bypass -File runalerts\set-wait-timeout.ps1 -WaitTimeout 900 -Apply
+    powershell -ExecutionPolicy Bypass -File runalerts\set-wait-timeout.ps1 -Rollback "%LOCALAPPDATA%\G2C\wait-timeout-state-<stamp>.jsonl"
 
-(or run `runalerts/set-wait-timeout.sh` under Git Bash/WSL, which macOS and
-Linux use directly; the script's awk/sed usage is POSIX).
+DRY RUN is the default (prints the priors read from the raw `config.yaml` and
+the exact commands; nothing is written). `-Apply` writes the JSONL state file
+first (same schema and kind as the .sh, private to the user by default in
+`%LOCALAPPDATA%\G2C`, `G2C_STATE_DIR` overrides the default dir for test
+sandboxes, `-State` an explicit file) and only then runs `hermes config set`,
+verified per profile with `config get`; `-Rollback` replays the recorded
+priors (`config unset` for keys that were unset before, `config set` for set
+ones; "already unset" is tolerated). The batch refuses before anything is
+touched when a named profile's `profiles\<p>\config.yaml` or the default
+profile's home-root `config.yaml` is missing (a typo would make
+`hermes config set` create a junk profile), on a legacy `clarify.timeout`
+key (unless `-AlsoLegacy`), and on any undecidable raw prior. The hermes
+binary is `$env:HERMES_BIN` when set, else `hermes.exe` resolved with
+`Get-Command -CommandType Application`: a bare `hermes` can resolve to a
+non-exe launcher script on Windows, so point `HERMES_BIN` at an .exe file
+when in doubt. Tests for the port are `tests/test_set_wait_timeout_ps1.py`
+(skipped when no PowerShell interpreter is found; CI runs them on ubuntu,
+macos and windows).
+
+Fallback without the script (per profile, then verify with get):
+
+    hermes.exe -p <p> config set agent.clarify_timeout 600
+    hermes.exe -p <p> config set approvals.timeout 600
+    hermes.exe -p <p> config get agent.clarify_timeout
+    hermes.exe -p <p> config get approvals.timeout
+
+(or run `runalerts/set-wait-timeout.sh` under Git Bash/WSL on macOS and
+Linux, where its awk/sed usage is POSIX; do NOT run the .sh against the
+Windows Hermes: it assumes the POSIX profile root and Git Bash's HOME is
+wrong there - use the .ps1).
 
 Known limits: the prior-value reader is line-based block YAML. Alias and
 merge keys (`<<`, `*`, `&`) are not consulted, so a profile that injects the
