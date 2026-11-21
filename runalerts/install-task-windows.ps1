@@ -267,10 +267,11 @@ if (-not (Test-Path -LiteralPath $NewDirectory)) {
 # The logon trigger's user, computed once and reused below (dry-run report
 # and the real trigger): see the header note. USERDOMAIN is normally
 # populated on Windows; when it is missing the bare USERNAME scopes the
-# trigger, and when both are unavailable the run reports it or refuses
-# instead of building an un-scoped trigger.
+# trigger, and when USERNAME is unavailable (whatever USERDOMAIN holds) the
+# run reports it or refuses instead of building an un-scoped or malformed
+# trigger.
 $LogonUser = $env:USERNAME
-if (-not [string]::IsNullOrEmpty($env:USERDOMAIN)) {
+if (-not [string]::IsNullOrEmpty($env:USERNAME) -and -not [string]::IsNullOrEmpty($env:USERDOMAIN)) {
     $LogonUser = "$env:USERDOMAIN\$env:USERNAME"
 }
 
@@ -303,7 +304,7 @@ $trigger  = New-ScheduledTaskTrigger -Once -At (Get-Date) `
 # The logon trigger is scoped to the current user (see the $LogonUser note
 # above): the any-user trigger form needs elevation to register.
 if ([string]::IsNullOrEmpty($LogonUser)) {
-    throw "The user name could not be read (USERDOMAIN and USERNAME are both empty): cannot scope the logon trigger to the current user"
+    throw "The user name could not be read (USERNAME is empty): cannot scope the logon trigger to the current user"
 }
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $LogonUser
 # ExecutionTimeLimit stays strictly under the 1-minute repetition: a stuck run

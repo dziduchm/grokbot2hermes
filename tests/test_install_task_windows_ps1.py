@@ -487,6 +487,23 @@ class InstallTaskWindowsDryRunTest(InstallTaskWindowsScriptHarness):
                       " not be read on this host)", proc.stdout)
         self.assertEqual(self.marker_text(marker), "")
 
+    @unittest.skipIf(sys.platform == "win32",
+                     "a child process with an empty USERNAME is unreliable"
+                     " on Windows")
+    def test_dry_run_with_domain_but_no_username_reports_unavailable(self):
+        # USERDOMAIN set but USERNAME gone: never compose a bare "DOMAIN\\"
+        # trigger user; report the user name as unreadable instead.
+        python_exe = self.make_interpreter(with_pythonw=True)
+        sender = self.make_sender()
+        self.write_filled(python_exe, sender)
+        proc, marker, _ = self.run_script(extra_env={
+            "USERDOMAIN": "TESTDOM", "USERNAME": None})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("plus fire once at logon of the current user (the user"
+                      " name could not be read on this host)", proc.stdout)
+        self.assertNotIn("logon of TESTDOM", proc.stdout)
+        self.assertEqual(self.marker_text(marker), "")
+
 
 class InstallTaskWindowsDryRunDocsTest(unittest.TestCase):
     """Pure file reads: the docs must carry the switch, the manual steps and

@@ -202,7 +202,7 @@ installer would take, each line prefixed `DRY RUN:`, without registering,
 removing or starting anything and without writing any file. The dry run exits
 non-zero only when the placeholders are still unfilled; placeholder state,
 path existence, the pythonw.exe choice or the python.exe fallback warning,
-the `G2C_RUNALERTS_LEDGER` check, the log directory it would create, the
+the `G2C_RUNALERTS_LEDGER` check, the log directory it would create,
 the task name, the exact action (executable plus argument string), triggers
 (the logon trigger names its user), settings and the would-be register and
 start are all reported. With
