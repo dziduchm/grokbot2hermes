@@ -303,10 +303,12 @@ taps failed during the temporary window, those agents still need a manual
 resolve after the rollback.
 
 Windows: `runalerts/set-wait-timeout.ps1` is the Windows port (PowerShell 5.1
-compatible, no pwsh 7-only syntax; same behaviour, safety posture and exit
-codes as the .sh). Windows Hermes today runs the `default` profile, whose
-config lives in the Hermes home root (`%LOCALAPPDATA%\hermes\config.yaml`;
-`HERMES_HOME` overrides the home), and it is managed WITHOUT `-p`:
+compatible, no pwsh 7-only syntax; same safety posture and exit codes as the
+.sh, with one documented divergence: how a negative prior value is treated,
+see Known limits below). Windows Hermes today runs the `default` profile,
+whose config lives in the Hermes home root
+(`%LOCALAPPDATA%\hermes\config.yaml`; `HERMES_HOME` overrides the home),
+and it is managed WITHOUT `-p`:
 
     powershell -ExecutionPolicy Bypass -File runalerts\set-wait-timeout.ps1
     powershell -ExecutionPolicy Bypass -File runalerts\set-wait-timeout.ps1 -WaitTimeout 900 -Apply
@@ -329,9 +331,22 @@ binary is `$env:HERMES_BIN` when set, else `hermes.exe` resolved with
 non-exe launcher script on Windows, so point `HERMES_BIN` at an .exe file
 when in doubt. Tests for the port are `tests/test_set_wait_timeout_ps1.py`
 (skipped when no PowerShell interpreter is found; CI runs them on ubuntu,
-macos and windows).
+macos and windows, where the windows legs execute the suite once per
+discovered interpreter: pwsh 7 AND powershell.exe 5.1 when both are
+installed).
 
-Fallback without the script (per profile, then verify with get):
+Fallback without the script (then verify each write with `get`). Windows
+Hermes today runs only the `default` profile and it is managed WITHOUT
+`-p` (the flagless call lands on the default profile; `-p default` instead
+creates/points the CLI at a junk `profiles\default\` dir, exactly the junk
+profile the script's own missing-config guard refuses to create for you):
+
+    hermes.exe config set agent.clarify_timeout 600
+    hermes.exe config set approvals.timeout 600
+    hermes.exe config get agent.clarify_timeout
+    hermes.exe config get approvals.timeout
+
+A named profile takes `-p <p>`:
 
     hermes.exe -p <p> config set agent.clarify_timeout 600
     hermes.exe -p <p> config set approvals.timeout 600
@@ -352,7 +367,15 @@ as does any multi-line flow value. The rollback parser accepts only the exact
 header record and the exact profile/key/prior record lines (a line that
 merely contains the header's kind text is refused, never skipped) and
 restores only what `--apply` recorded; it is not a YAML editor and never
-touches the profile files themselves.
+touches the profile files themselves. Negative priors:
+`agent.clarify_timeout` may legitimately hold a negative value (the
+documented `<= 0 unlimited` semantic). The ps1 displays such a prior in the
+dry run, records it in the state file and restores it on rollback; the .sh
+currently drops it to null (its `printf` eats the leading `-` of the format
+string), so a .sh rollback would `config unset` the key instead of
+restoring the negative value. This divergence is intended and test-pinned;
+do not harmonize the ps1 down to the .sh behaviour (fixing the .sh is a
+separate follow-up).
 
 ## Rollback
 

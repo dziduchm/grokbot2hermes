@@ -10,8 +10,15 @@
 #                           _get_approval_timeout: default 300, clamped to
 #                           agent.deadline.MAX_SAFE_TIMEOUT_S)
 #
-# Port of runalerts/set-wait-timeout.sh (bash 3.2, macOS/Linux) with the same
-# behaviour, safety posture and exit codes. Windows mapping:
+# Port of runalerts/set-wait-timeout.sh (bash 3.2, macOS/Linux) with the
+# same safety posture and exit codes, and ONE documented divergence: a
+# negative prior value (e.g. agent.clarify_timeout: -5, the documented
+# "<= 0 unlimited" semantic) is displayed, recorded in the state file and
+# restored on rollback, while the .sh drops it to null (its printf chokes
+# on the leading '-' of the format string, so a .sh rollback would config
+# unset the key instead of restoring the negative value; keep the ps1
+# behaviour - fixing the .sh is a separate follow-up). Known limits in
+# runalerts/README.md "Wait timeout". Windows mapping:
 #   Hermes home     HERMES_HOME when set, else %LOCALAPPDATA%\hermes
 #   default profile config at <home>\config.yaml; called WITHOUT -p (the
 #                   hermes CLI applies flagless calls to the default profile)

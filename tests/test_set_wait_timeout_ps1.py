@@ -7,10 +7,12 @@ FAIL text, exact hermes call order, the recorded state JSONL and the stub's
 config values. The ps1 must reach the hermes CLI only; this suite pins
 that writes never bypass it.
 
-Skipped when no PowerShell interpreter is found: this repo's own Mac has no
-pwsh; TheCow runs this suite under pwsh 7.4 on Linux and CI runs it on
-ubuntu, macos and windows (GitHub images ship pwsh; windows also carries
-powershell.exe 5.1, the compatibility target of the script).
+Skipped when no PowerShell interpreter is found. The suite builds one test
+leg per discovered interpreter (test classes are generated at the bottom of
+this module): pwsh first everywhere; on win32 a second powershell.exe (5.1)
+leg joins when pwsh also exists, so the windows CI legs execute the script's
+compatibility target too, not just pwsh 7. Elsewhere the single leg stays
+whatever _pwsh_legs() finds (pwsh, or a powershell.exe-style fallback).
 """
 import json
 import os
@@ -20,18 +22,39 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import Optional
 
 
-def _find_pwsh() -> Optional[str]:
-    for name in ("pwsh", "powershell", "powershell.exe"):
-        found = shutil.which(name)
-        if found:
-            return found
-    return None
+def _same_exe(a, b):
+    return (os.path.normcase(os.path.realpath(a))
+            == os.path.normcase(os.path.realpath(b)))
 
 
-PWSH = _find_pwsh()
+def _pwsh_legs():
+    # One suite leg per discovered PowerShell interpreter, as (label, test
+    # class name suffix, exe). pwsh first everywhere it exists; on win32 a
+    # second powershell.exe (5.1) leg joins when it is a DIFFERENT binary
+    # (S4, mitch-wtps1-review: the windows CI images carry both, so both get
+    # executed instead of a pwsh-only run). Without pwsh anywhere, fall back
+    # to the old single-lookup behaviour.
+    legs = []
+    pwsh = shutil.which("pwsh")
+    if pwsh:
+        legs.append(("pwsh7", "Pwsh7", pwsh))
+    if sys.platform == "win32":
+        ps51 = shutil.which("powershell") or shutil.which("powershell.exe")
+        if ps51 and not (pwsh and _same_exe(pwsh, ps51)):
+            legs.append(("powershell51", "PowerShell51", ps51))
+    if not legs:
+        for suffix, name in (("PowerShell", "powershell"),
+                             ("PowerShell", "powershell.exe")):
+            found = shutil.which(name)
+            if found:
+                legs.append(("powershell", suffix, found))
+                break
+    return legs
+
+
+PWSH_LEGS = _pwsh_legs()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
@@ -240,14 +263,30 @@ approvals:
     timeout: 700
 """
 
+PROFILE_NEGATIVE = """\
+# fixture: negative prior value; agent.clarify_timeout may legitimately
+# hold "<= 0 unlimited" values (resolve_clarify_timeout semantics)
+agent:
+  clarify_timeout: -5
+approvals:
+  timeout: 300
+"""
+
 
 def state_header_text(wait_timeout):
     return ('{"kind": "%s", "created_utc": "%s", "wait_timeout": %d}'
             % (STATE_KIND, "2026-11-21T12:00:00Z", wait_timeout))
 
 
-@unittest.skipUnless(PWSH, "pwsh (or powershell.exe on win32) not found: ps1 tests skipped")
+@unittest.skipUnless(PWSH_LEGS,
+                     "no PowerShell interpreter found: ps1 tests skipped")
 class TestSetWaitTimeoutPs1(unittest.TestCase):
+
+    # Overridden per interpreter leg by the parametrizer at the bottom of
+    # this module; these defaults only matter when no leg was built, in
+    # which case the decorator above skips the whole file anyway.
+    SHELL_LABEL = PWSH_LEGS[0][0] if PWSH_LEGS else "none"
+    SHELL_EXE = PWSH_LEGS[0][2] if PWSH_LEGS else ""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="g2c-wtps1-")
@@ -285,9 +324,10 @@ class TestSetWaitTimeoutPs1(unittest.TestCase):
             os.chmod(stub, 0o755)
         return stub
 
-    def run_ps(self, *args):
-        base = [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
-                "Bypass", "-File", SCRIPT] + [str(x) for x in args]
+    def run_ps(self, *args, drop_hermes_bin=False):
+        base = [self.SHELL_EXE, "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", SCRIPT] \
+               + [str(x) for x in args]
         env = dict(os.environ)
         env.update({
             "HERMES_BIN": self.stub,
@@ -296,6 +336,15 @@ class TestSetWaitTimeoutPs1(unittest.TestCase):
             "FAKE_HERMES_LOG": self.log_path,
             "FAKE_HERMES_STATE": self.stub_state,
         })
+        if drop_hermes_bin:
+            # S3 (mitch-wtps1-review): run with HERMES_BIN unset and a PATH
+            # that carries no hermes at all, so the ps1's own hermes.exe
+            # resolution is exercised. The PATH value is one empty sandbox
+            # dir: guaranteed hermes-free on every platform.
+            env.pop("HERMES_BIN", None)
+            pathdir = os.path.join(self.tmp, "empty-path")
+            os.makedirs(pathdir, exist_ok=True)
+            env["PATH"] = pathdir
         proc = subprocess.run(base, env=env, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE)
         self.last_out = proc.stdout.decode("utf-8", "replace")
@@ -394,6 +443,44 @@ class TestSetWaitTimeoutPs1(unittest.TestCase):
         self.assertIn("approvals.timeout=600", self.last_out)
         self.assertIn("legacy clarify.timeout=450", self.last_out)
         self.assert_no_calls()
+
+    def test_negative_prior_displayed_recorded_and_restored(self):
+        # W1 (mitch-wtps1-review): agent.clarify_timeout may legitimately
+        # hold a negative value (the documented "<= 0 unlimited" semantic).
+        # The ps1 shows it in the dry run, records it in the state file and
+        # restores it on rollback; the .sh drops a negative prior to null
+        # instead. Pinned here so the ps1 cannot be "harmonized" down to the
+        # .sh's data-loss variant (a .sh-style rollback would config unset
+        # the key instead of restoring -5). The divergence is documented in
+        # the ps1 header, runalerts/README.md and CHANGELOG.
+        self.write_named("solo", PROFILE_NEGATIVE)
+        proc = self.run_ps("-Profiles", "solo")
+        self.assertEqual(proc.returncode, 0, self.last_err)
+        self.assertIn("agent.clarify_timeout=-5", self.last_out)
+        self.assertIn("approvals.timeout=300", self.last_out)
+        self.assert_no_calls()
+        state_path = os.path.join(self.state_dir, "state.jsonl")
+        proc = self.run_ps("-Apply", "-Profiles", "solo", "-State", state_path)
+        self.assertEqual(proc.returncode, 0, self.last_err)
+        header, records = self.read_state(state_path)
+        self.assertEqual(header["wait_timeout"], 600)
+        self.assertEqual([
+            (r["profile"], r["key"], r["prior"]) for r in records], [
+            ("solo", "agent.clarify_timeout", -5),
+            ("solo", "approvals.timeout", 300),
+        ])
+        open(self.log_path, "w").close()  # keep only the rollback's calls
+        proc = self.run_ps("-Rollback", state_path)
+        self.assertEqual(proc.returncode, 0, self.last_err)
+        self.assertEqual(self.profile_ops(
+            "solo", "set", "agent.clarify_timeout"), ["-5"])
+        self.assertEqual(self.profile_ops(
+            "solo", "set", "approvals.timeout"), ["300"])
+        self.assert_stub_config("solo", {
+            "agent.clarify_timeout": "-5",
+            "approvals.timeout": "300",
+        })
+        self.assertIn("rollback done", self.last_out)
 
     def test_dry_run_refuses_a_leaf_deeper_than_the_children(self):
         self.write_named("solo", PROFILE_DEEP_LEAF)
@@ -506,6 +593,29 @@ class TestSetWaitTimeoutPs1(unittest.TestCase):
         proc = self.run_ps("-Help")
         self.assertEqual(proc.returncode, 0, self.last_err)
         self.assertIn("Usage", self.last_out)
+        self.assert_no_calls()
+
+    def test_no_hermes_binary_dry_run_note_and_apply_refusal(self):
+        # S3 (mitch-wtps1-review): exercise the hermes.exe resolution branch
+        # that every other test bypasses via HERMES_BIN. With HERMES_BIN
+        # unset and a PATH without any hermes, the dry run notes the
+        # unresolved binary and still prints its commands, while -Apply
+        # refuses with exit 2 and touches nothing.
+        self.write_default_profile(HERMES_HOME_CONFIG)
+        proc = self.run_ps(drop_hermes_bin=True)
+        self.assertEqual(proc.returncode, 0, self.last_err)
+        self.assertIn("note: no hermes.exe found on PATH and HERMES_BIN is"
+                      " not set", self.last_out)
+        self.assertIn("DRY RUN", self.last_out)
+        self.assertIn("hermes.exe config set agent.clarify_timeout 600",
+                      self.last_out)
+        self.assert_no_calls()
+        state_path = os.path.join(self.state_dir, "s.jsonl")
+        proc = self.run_ps("-Apply", "-State", state_path,
+                           drop_hermes_bin=True)
+        self.assertEqual(proc.returncode, 2, self.last_err)
+        self.assertIn("no hermes.exe found", self.last_err)
+        self.assertFalse(os.path.exists(state_path))
         self.assert_no_calls()
 
     # -- apply --------------------------------------------------------------
@@ -833,6 +943,30 @@ class TestSetWaitTimeoutPs1(unittest.TestCase):
         self.assertEqual(proc.returncode, 1, self.last_err)
         self.assertIn("state file not found", self.last_err)
         self.assert_no_calls()
+
+
+def _parametrize_ps1_test_classes():
+    # S4 (mitch-wtps1-review): give every test one generated TestCase
+    # subclass per discovered interpreter so the whole suite runs under each
+    # leg (posix: pwsh only; win32 with both interpreters: pwsh 7 AND
+    # powershell.exe 5.1). The base class is removed from the module
+    # namespace so discovery does not run leg one twice; when no interpreter
+    # exists the parametrizer does nothing and the skipUnless decorator on
+    # the base class skips the file instead.
+    global TestSetWaitTimeoutPs1
+    if not PWSH_LEGS:
+        return
+    base = TestSetWaitTimeoutPs1
+    del TestSetWaitTimeoutPs1
+    for label, suffix, exe in PWSH_LEGS:
+        cls = type("TestSetWaitTimeoutPs1" + suffix, (base,), {
+            "SHELL_LABEL": label,
+            "SHELL_EXE": exe,
+        })
+        setattr(sys.modules[__name__], cls.__name__, cls)
+
+
+_parametrize_ps1_test_classes()
 
 
 if __name__ == "__main__":

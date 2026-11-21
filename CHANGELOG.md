@@ -9,11 +9,17 @@ Added:
 
 - `runalerts/set-wait-timeout.ps1`: the Windows port of the wait timeout
   installer (PowerShell 5.1 compatible, no pwsh 7-only syntax). Same
-  behaviour and safety as the .sh: dry run by default, fail-closed raw-layer
-  prior reader (the same line-based block YAML semantics), state JSONL first
-  (same schema and kind, private to the user), writes only via
+  safety posture and exit codes as the .sh: dry run by default, fail-closed
+  raw-layer prior reader (the same line-based block YAML semantics), state
+  JSONL first (same schema and kind, private to the user), writes only via
   `hermes config set|unset|get` with per-profile verification, and the same
-  legacy `clarify.timeout` guard. Windows differences documented in
+  legacy `clarify.timeout` guard. One documented divergence from the .sh: a
+  negative prior value (the documented "<= 0 unlimited" semantic of
+  `agent.clarify_timeout`) is displayed, recorded in the state file and
+  restored on rollback by the ps1, where the .sh drops it to null (its
+  printf eats the leading '-'); documented in runalerts/README.md
+  "Wait timeout" and pinned by a dedicated test. Windows differences
+  documented in
   runalerts/README.md: the Hermes home resolves from `HERMES_HOME` or
   `%LOCALAPPDATA%\hermes`; the `default` profile is called without `-p` and
   reads its config from the home root; the hermes binary is `$env:HERMES_BIN`
@@ -23,7 +29,10 @@ Added:
   ps1 refuses a batch when a profile's own config.yaml is missing (the .sh
   guards the profile dir only). Tests `tests/test_set_wait_timeout_ps1.py`
   drive the real ps1 with a fake hermes stub, skip when no PowerShell is
-  found, and run in CI on ubuntu, macos and windows.
+  found, and run in CI on ubuntu, macos and windows (on win32 the suite
+  builds one test leg per discovered PowerShell interpreter, so the windows
+  CI legs exercise both pwsh 7 and powershell.exe 5.1 when both are
+  installed).
 
 Changed:
 
