@@ -1,11 +1,13 @@
-"""Tests for runalerts/install-task-windows.ps1's -DryRun switch.
+"""Tests for runalerts/install-task-windows.ps1's -DryRun switch and real run.
 
-Two layers:
+Three layers:
 
 - InstallTaskWindowsDryRunTest drives the real script in a temporary filled
   copy under a stub harness: stub functions named New-Item,
   Register-ScheduledTask, Unregister-ScheduledTask, Start-ScheduledTask,
-  schtasks.exe and schtasks shadow the real commands and append to a marker
+  Get-ScheduledTask, New-ScheduledTaskTrigger, New-ScheduledTaskSettingsSet,
+  New-ScheduledTaskAction, schtasks.exe and schtasks shadow the real
+  commands and append to a marker
   file, so the test proves -DryRun changes nothing (empty marker, no log
   directory created) while reporting the expected DRY RUN lines. The stub
   must be named schtasks.exe because PowerShell resolves commands by exact
@@ -17,15 +19,30 @@ Two layers:
   PowerShell host: pwsh anywhere, or powershell.exe on Windows. No real
   scheduled task, launchctl agent or machine state is ever touched: the
   script sees only the temporary directory (overridden APPDATA).
-- InstallTaskWindowsDryRunDocsTest is a pure file read (runs everywhere,
-  pwsh not needed) pinning the header, README and CHANGELOG documentation of
-  the switch, the manual fill-and-pin steps, and the explicit legacy-name
-  migration order.
+- InstallTaskWindowsRealRunTest drives the real script's real (non-dry-run)
+  path through the same stub harness plus env knobs the harness stubs read
+  (ledger value, per-stub failure modes, task presence for uninstall). The
+  user-scope ledger read is a harness-shadowable function seam in the
+  script (Get-G2CLedgerUserValue): an inline .NET static call could not be
+  stubbed from PowerShell, and the stub-driven real-run tests must pass
+  this gate on hosts without a User environment-variable scope. The
+  harness normalizes the child's exit code to 0/1 (see the harness tail
+  comment), so these tests assert non-zero exits dynamically and the
+  distinct exit codes are pinned on the script text by
+  InstallTaskWindowsScriptTextTest. Every machine boundary is stubbed, so
+  these tests stay inert on every host.
+- InstallTaskWindowsScriptTextTest and InstallTaskWindowsDryRunDocsTest
+  are pure file reads (run everywhere, pwsh not needed) pinning the
+  script's own text (the user-scoped logon trigger, -ErrorAction Stop, the
+  exit codes, success lines only after both steps) and the header, README
+  and CHANGELOG documentation of the switch, the manual fill-and-pin
+  steps, the legacy-name migration order and the failure behavior.
 """
 
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -38,7 +55,11 @@ LEGACY_TASK_NAME = "ComMdG2c.RunalertsSender"
 # pwsh 7 and Windows PowerShell 5.1 both take the call operator's child-script
 # exit code differently enough that the harness normalizes it: after the child
 # runs, the harness exits 0 on pipeline success ($?) and 1 otherwise, which
-# matches the child's exit 0/exit 1 under either nesting behavior.
+# matches the child's exit 0/exit 1 under either nesting behavior. A deeper
+# consequence: the child's exact exit code is not observable through this
+# harness (the tail collapses it to 0/1), so the real-run tests assert
+# non-zero dynamically and the distinct exit codes are pinned on the script
+# text by InstallTaskWindowsScriptTextTest.
 STUB_HARNESS = """\
 param(
     [switch]$DryRun,
@@ -51,28 +72,96 @@ function New-Item {
     return $null
 }
 
+# The script reads the user-scope ledger value through Get-G2CLedgerUserValue
+# (its harness-shadowable function seam: the script defines that function
+# only when no caller already did, so this pre-definition wins). The stub
+# supplies G2C_STUB_LEDGER when set and throws otherwise, mimicking a host
+# without a User environment-variable scope (pwsh on Linux or macOS) so the
+# dry-run wording matches that host.
+function Get-G2CLedgerUserValue {
+    if (-not $env:G2C_STUB_LEDGER) {
+        throw "Get-G2CLedgerUserValue stub: no User-scope value available (set G2C_STUB_LEDGER to supply one)"
+    }
+    return $env:G2C_STUB_LEDGER
+}
+
+# Switch-shaped parameters are typed [switch] in the stubs: an untyped
+# parameter under [CmdletBinding()] makes the script's bare -Once/-AtLogOn
+# style flags fail parameter binding ("Missing an argument for parameter"),
+# while [switch] binds a bare flag exactly like the real cmdlet does.
+function New-ScheduledTaskTrigger {
+    [CmdletBinding()] param([switch]$Once, $At, $RepetitionInterval, $RepetitionDuration, [switch]$AtLogOn, $User)
+    $shape = "New-ScheduledTaskTrigger"
+    if ($Once) { $shape = "$shape once=True" }
+    if ($AtLogOn) { $shape = "$shape logon=True" }
+    $shape = "$shape user=$User"
+    Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value $shape
+    return [pscustomobject]@{ Once = [bool]$Once; AtLogOn = [bool]$AtLogOn; User = $User }
+}
+
+function New-ScheduledTaskSettingsSet {
+    [CmdletBinding()] param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, $ExecutionTimeLimit, $MultipleInstances)
+    Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value "New-ScheduledTaskSettingsSet"
+    return [pscustomobject]@{ Hidden = $false }
+}
+
+function New-ScheduledTaskAction {
+    [CmdletBinding()] param($Execute, $Argument)
+    Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value "New-ScheduledTaskAction $Execute"
+    return [pscustomobject]@{ Execute = $Execute; Argument = $Argument }
+}
+
+# Task presence for the uninstall paths (the real Get-ScheduledTask is
+# Windows-only and reads machine state): G2C_STUB_TASK_PRESENT=absent
+# reports no task present, anything else (including unset) reports the
+# queried name present. No marker on purpose: the dry-run tests assert the
+# marker stays empty.
+function Get-ScheduledTask {
+    [CmdletBinding()] param($TaskName)
+    if ($env:G2C_STUB_TASK_PRESENT -eq "absent") { return $null }
+    return [pscustomobject]@{ TaskName = $TaskName }
+}
+
+# -ErrorAction Stop (the script's calls carry it) only binds once the stubs
+# are advanced functions ([CmdletBinding()] brings the common parameters),
+# and G2C_STUB_*_FAIL turns a stub into the Access-denied/failure shape the
+# failure-path tests drive.
 function Register-ScheduledTask {
-    param($TaskName, $Trigger, $Settings, $Action, $Description)
-    Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value "Register-ScheduledTask $TaskName"
+    [CmdletBinding()] param($TaskName, $Trigger, $Settings, $Action, $Description)
+    Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value ("Register-ScheduledTask " + $TaskName + " triggers=" + @($Trigger).Count)
+    if ($env:G2C_STUB_REGISTER_FAIL) {
+        throw "Access is denied. (Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))"
+    }
 }
 
 function Unregister-ScheduledTask {
-    param($TaskName, $Confirm)
+    [CmdletBinding()] param($TaskName, $Confirm)
     Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value "Unregister-ScheduledTask $TaskName"
+    if ($env:G2C_STUB_UNREGISTER_FAIL) {
+        throw "Access is denied. (Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))"
+    }
 }
 
 function Start-ScheduledTask {
-    param($TaskName)
+    [CmdletBinding()] param($TaskName)
     Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value "Start-ScheduledTask $TaskName"
+    if ($env:G2C_STUB_START_FAIL) {
+        throw "Start-ScheduledTask : The scheduled task $TaskName failed to start"
+    }
 }
 
 # PowerShell resolves commands by exact name: the uninstall fallback calls
 # & schtasks.exe, so the stub must carry the .exe suffix to own that token
-# (a function named schtasks never intercepts it). Both spellings stub into
-# the marker, so any spelling of a future external-tool call is caught.
+# (a function named schtasks never intercepts it). ValueFromRemainingArguments
+# binds the script's four-argument fallback call (& schtasks.exe /Delete /TN
+# $task /F), which a single positional parameter would refuse. The stub
+# publishes its simulated exit code through $global:LASTEXITCODE because the
+# script checks $LASTEXITCODE after the call (a function stub does not set it
+# the way the real exe would).
 function schtasks.exe {
-    param($ArgumentList)
+    [CmdletBinding()] param([Parameter(ValueFromRemainingArguments = $true)]$ArgumentList)
     Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value "schtasks.exe $ArgumentList"
+    if ($env:G2C_STUB_SCHTASKS_FAIL) { $global:LASTEXITCODE = 1 } else { $global:LASTEXITCODE = 0 }
 }
 
 function schtasks {
@@ -122,8 +211,12 @@ REQUIRES_POWERSHELL = unittest.skipUnless(
 
 
 @REQUIRES_POWERSHELL
-class InstallTaskWindowsDryRunTest(unittest.TestCase):
-    """Drive the real template in a temp filled copy under the stub harness."""
+class InstallTaskWindowsScriptHarness(unittest.TestCase):
+    """Shared base for the dry-run and real-run classes: temp directory, a
+    filled template copy, the stub harness invocation and marker reads.
+    extra_env adds or overrides child env keys; a None value pops the key
+    (popping USERDOMAIN exercises the bare-username logon-trigger fallback
+    on every host)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="g2c-dryrun-")
@@ -140,7 +233,7 @@ class InstallTaskWindowsDryRunTest(unittest.TestCase):
             handle.write(filled)
         return path
 
-    def run_script(self, dry_run=True, uninstall=False):
+    def run_script(self, dry_run=True, uninstall=False, extra_env=None):
         harness = os.path.join(self.tmp, "harness.ps1")
         with open(harness, "w", encoding="utf-8", newline="") as handle:
             handle.write(STUB_HARNESS)
@@ -150,6 +243,12 @@ class InstallTaskWindowsDryRunTest(unittest.TestCase):
         env = dict(os.environ)
         env["G2C_DRYRUN_MARKER"] = marker
         env["APPDATA"] = appdata
+        if extra_env:
+            for key, value in extra_env.items():
+                if value is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = value
         args = [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
                 "-File", harness]
         if dry_run:
@@ -184,6 +283,11 @@ class InstallTaskWindowsDryRunTest(unittest.TestCase):
         with open(sender, "w", encoding="utf-8") as handle:
             handle.write("# sender copy\n")
         return sender
+
+
+@REQUIRES_POWERSHELL
+class InstallTaskWindowsDryRunTest(InstallTaskWindowsScriptHarness):
+    """Drive the real template in a temp filled copy under the stub harness."""
 
     def test_dry_run_reports_every_action_and_changes_nothing(self):
         python_exe = self.make_interpreter(with_pythonw=True)
@@ -339,6 +443,67 @@ class InstallTaskWindowsDryRunTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(self.marker_text(marker), "schtasks.exe /Query")
 
+    def test_dry_run_shows_the_scoped_logon_user(self):
+        python_exe = self.make_interpreter(with_pythonw=True)
+        sender = self.make_sender()
+        self.write_filled(python_exe, sender)
+        proc, marker, _ = self.run_script(extra_env={
+            "USERDOMAIN": "TESTDOM", "USERNAME": "dzidu"})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("DRY RUN: triggers: fire once starting now, then"
+                      " repeat every 1 minute for 3650 days, plus fire once"
+                      " at logon of TESTDOM\\dzidu", proc.stdout)
+        self.assertEqual(self.marker_text(marker), "")
+
+    def test_dry_run_logon_user_falls_back_to_the_bare_username(self):
+        # USERDOMAIN missing (popped, so the Windows CI leg sees it gone
+        # too): the bare USERNAME scopes the trigger, as documented in the
+        # script header and the README.
+        python_exe = self.make_interpreter(with_pythonw=True)
+        sender = self.make_sender()
+        self.write_filled(python_exe, sender)
+        proc, marker, _ = self.run_script(extra_env={
+            "USERDOMAIN": None, "USERNAME": "g2ctestuser"})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("plus fire once at logon of g2ctestuser", proc.stdout)
+        self.assertEqual(self.marker_text(marker), "")
+
+    @unittest.skipIf(sys.platform == "win32",
+                     "a child process with an empty USERNAME is unreliable"
+                     " on Windows")
+    def test_dry_run_without_user_names_reports_the_unavailable_host(self):
+        # Both USERDOMAIN and USERNAME gone: the dry run says the user name
+        # could not be read instead of printing an empty trigger user, and
+        # the real run would refuse (pinned statically).
+        python_exe = self.make_interpreter(with_pythonw=True)
+        sender = self.make_sender()
+        self.write_filled(python_exe, sender)
+        proc, marker, _ = self.run_script(extra_env={
+            "USERDOMAIN": None, "USERNAME": None})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("DRY RUN: triggers: fire once starting now, then"
+                      " repeat every 1 minute for 3650 days, plus fire once"
+                      " at logon of the current user (the user name could"
+                      " not be read on this host)", proc.stdout)
+        self.assertEqual(self.marker_text(marker), "")
+
+    @unittest.skipIf(sys.platform == "win32",
+                     "a child process with an empty USERNAME is unreliable"
+                     " on Windows")
+    def test_dry_run_with_domain_but_no_username_reports_unavailable(self):
+        # USERDOMAIN set but USERNAME gone: never compose a bare "DOMAIN\\"
+        # trigger user; report the user name as unreadable instead.
+        python_exe = self.make_interpreter(with_pythonw=True)
+        sender = self.make_sender()
+        self.write_filled(python_exe, sender)
+        proc, marker, _ = self.run_script(extra_env={
+            "USERDOMAIN": "TESTDOM", "USERNAME": None})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("plus fire once at logon of the current user (the user"
+                      " name could not be read on this host)", proc.stdout)
+        self.assertNotIn("logon of TESTDOM", proc.stdout)
+        self.assertEqual(self.marker_text(marker), "")
+
 
 class InstallTaskWindowsDryRunDocsTest(unittest.TestCase):
     """Pure file reads: the docs must carry the switch, the manual steps and
@@ -397,6 +562,272 @@ class InstallTaskWindowsDryRunDocsTest(unittest.TestCase):
         self.assertIn("removes both names", unreleased)
         self.assertIn("then re-run the installer", unreleased)
         self.assertIn("exactly one task", unreleased)
+
+    def test_changelog_unreleased_documents_the_scoped_trigger_and_failures(self):
+        unreleased = self.prose(self.changelog_unreleased())
+        self.assertIn("per-user logon trigger", unreleased)
+        self.assertIn("register failure exits 3", unreleased)
+        self.assertIn("start failure exits 4", unreleased)
+        self.assertIn("no success line is printed after a failure",
+                      unreleased)
+        self.assertIn("access is denied", unreleased)
+        self.assertIn("says the task is registered", unreleased)
+
+    def test_header_documents_the_scoped_trigger_and_the_failures(self):
+        # prose() keeps the '#' comment markers (whitespace-collapsed), so a
+        # pinned phrase must stay on one comment line of the header.
+        header = self.prose(self.ps1_header())
+        self.assertIn("plus a logon trigger scoped", header)
+        self.assertIn("userdomain and username (when userdomain is empty",
+                      header)
+        self.assertIn("the bare user name is", header)
+        self.assertIn("code 3 for a register failure", header)
+        self.assertIn("exit code 4 for a start failure", header)
+        self.assertIn("no success line", header)
+        self.assertIn("says the task is registered", header)
+        self.assertIn("re-run after fixing the cause", header)
+
+    def test_readme_windows_section_documents_the_scoped_trigger_and_failures(self):
+        section = self.prose(self.readme_windows_section())
+        self.assertIn("per-user logon trigger scoped to the current user",
+                      section)
+        self.assertIn("computed once from `userdomain` and `username`",
+                      section)
+        self.assertIn("the bare user name is used", section)
+        self.assertIn("without elevation", section)
+        self.assertIn("a register failure exits 3", section)
+        self.assertIn("a start failure exits 4", section)
+        self.assertIn("never print a success line", section)
+        self.assertIn("usually means an any-user logon trigger", section)
+        self.assertIn("the task is registered", section)
+        self.assertIn("re-run the installer after fixing the cause", section)
+
+
+@REQUIRES_POWERSHELL
+class InstallTaskWindowsRealRunTest(InstallTaskWindowsScriptHarness):
+    """Drive the real script's real (non-dry-run) install path through the
+    stub harness. Every machine boundary is stubbed: the ScheduledTasks
+    cmdlets, schtasks.exe and the user-scope ledger read (the script reads
+    it through the Get-G2CLedgerUserValue function seam, which this harness
+    shadows; G2C_STUB_LEDGER supplies the value and the stub throws without
+    it, mimicking a host without a User scope). Env knobs:
+    G2C_STUB_REGISTER_FAIL, G2C_STUB_START_FAIL, G2C_STUB_UNREGISTER_FAIL
+    and G2C_STUB_SCHTASKS_FAIL turn the corresponding stub into its
+    failure shape; the unsubscribed defaults succeed. Nothing outside the
+    temp directories is touched on any host."""
+
+    def run_real(self, extra_env=None):
+        python_exe = self.make_interpreter(with_pythonw=True)
+        sender = self.make_sender()
+        self.write_filled(python_exe, sender)
+        merged = {
+            "USERDOMAIN": "TESTDOM",
+            "USERNAME": "dzidu",
+            "G2C_STUB_LEDGER": "C:\\stub\\ledger.jsonl",
+        }
+        if extra_env:
+            merged.update(extra_env)
+        return self.run_script(dry_run=False, extra_env=merged)
+
+    @staticmethod
+    def marker_lines(marker):
+        text = InstallTaskWindowsScriptHarness.marker_text(marker)
+        return [line for line in text.splitlines() if line]
+
+    def test_real_run_happy_path_builds_the_user_scoped_logon_trigger(self):
+        proc, marker, _ = self.run_real()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = proc.stdout
+        self.assertIn("Registered and started scheduled task " + TASK_NAME,
+                      out)
+        self.assertIn("Four 15-second-apart sender ticks", out)
+        self.assertIn("Log file: ", out)
+        self.assertIn("First tick behavior", out)
+        lines = self.marker_lines(marker)
+        trigger_lines = [line for line in lines
+                         if line.startswith("New-ScheduledTaskTrigger")]
+        self.assertEqual(len(trigger_lines), 2, lines)
+        logon_line = "New-ScheduledTaskTrigger logon=True user=TESTDOM\\dzidu"
+        self.assertIn(logon_line, lines)
+        once_lines = [line for line in trigger_lines if "once=True" in line]
+        self.assertEqual(len(once_lines), 1, trigger_lines)
+        self.assertNotIn("logon=True", once_lines[0])
+        register_line = ("Register-ScheduledTask " + TASK_NAME
+                         + " triggers=2")
+        self.assertIn(register_line, lines)
+        self.assertIn("Start-ScheduledTask " + TASK_NAME, lines)
+        # Order: both triggers built (the logon one carrying the env-derived
+        # user), then settings, then the registration, then the start.
+        self.assertLess(lines.index(logon_line), lines.index(register_line))
+        self.assertLess(lines.index("New-ScheduledTaskSettingsSet"),
+                        lines.index(register_line))
+        action_lines = [line for line in lines
+                        if line.startswith("New-ScheduledTaskAction ")]
+        self.assertEqual(len(action_lines), 1, lines)
+        self.assertIn("pythonw.exe", action_lines[0])
+        self.assertTrue(any(line.startswith("New-Item Directory")
+                            for line in lines), lines)
+
+    def test_real_run_register_access_denied_fails_loudly_without_starting(self):
+        proc, marker, _ = self.run_real(
+            extra_env={"G2C_STUB_REGISTER_FAIL": "1"})
+        # The harness tail normalizes the child's exit code to 0/1 (see the
+        # harness comment): the child took the register-failure branch, and
+        # the exact exit code (3) is pinned statically by
+        # InstallTaskWindowsScriptTextTest.
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        out = proc.stdout
+        self.assertIn("Register-ScheduledTask failed: Access is denied.", out)
+        self.assertIn("any-user logon trigger", out)
+        self.assertNotIn("Registered and started scheduled task", out)
+        self.assertNotIn("Four 15-second-apart sender ticks", out)
+        self.assertNotIn("Log file: ", out)
+        self.assertNotIn("First tick behavior", out)
+        lines = self.marker_lines(marker)
+        self.assertIn("Register-ScheduledTask " + TASK_NAME + " triggers=2",
+                      lines)
+        self.assertNotIn("Start-ScheduledTask " + TASK_NAME, lines)
+
+    def test_real_run_start_failure_reports_registered_but_not_started(self):
+        proc, marker, _ = self.run_real(
+            extra_env={"G2C_STUB_START_FAIL": "1"})
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        out = proc.stdout
+        self.assertIn("Start-ScheduledTask failed:", out)
+        self.assertIn("The task IS registered as " + TASK_NAME, out)
+        self.assertIn("Start-ScheduledTask -TaskName " + TASK_NAME, out)
+        self.assertIn("Unregister-ScheduledTask -TaskName " + TASK_NAME, out)
+        self.assertIn("schtasks /Delete /TN " + TASK_NAME + " /F", out)
+        self.assertNotIn("Registered and started scheduled task", out)
+        self.assertNotIn("Four 15-second-apart sender ticks", out)
+        lines = self.marker_lines(marker)
+        self.assertIn("Register-ScheduledTask " + TASK_NAME + " triggers=2",
+                      lines)
+        self.assertIn("Start-ScheduledTask " + TASK_NAME, lines)
+
+    def test_uninstall_real_run_removes_both_names_via_unregister(self):
+        # The uninstall branch exits before the placeholder checks, but the
+        # harness still needs the filled template copy to exist.
+        python_exe = self.make_interpreter(with_pythonw=True)
+        sender = self.make_sender()
+        self.write_filled(python_exe, sender)
+        proc, marker, _ = self.run_script(dry_run=False, uninstall=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = proc.stdout
+        for name in (TASK_NAME, LEGACY_TASK_NAME):
+            self.assertIn("Removed scheduled task " + name, out)
+        self.assertNotIn("schtasks fallback", out)
+        lines = self.marker_lines(marker)
+        for name in (TASK_NAME, LEGACY_TASK_NAME):
+            self.assertEqual(
+                lines.count("Unregister-ScheduledTask " + name), 1, lines)
+        self.assertTrue(
+            not any(line.startswith("schtasks.exe") for line in lines),
+            lines)
+        self.assertNotIn("Start-ScheduledTask", "\n".join(lines))
+
+    def test_uninstall_real_run_falls_back_to_schtasks_on_refusal(self):
+        python_exe = self.make_interpreter(with_pythonw=True)
+        sender = self.make_sender()
+        self.write_filled(python_exe, sender)
+        proc, marker, _ = self.run_script(
+            dry_run=False, uninstall=True,
+            extra_env={"G2C_STUB_UNREGISTER_FAIL": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = proc.stdout
+        for name in (TASK_NAME, LEGACY_TASK_NAME):
+            self.assertIn("Removed scheduled task " + name
+                          + " (schtasks fallback)", out)
+        self.assertNotIn("fallback also failed", out)
+        lines = self.marker_lines(marker)
+        for name in (TASK_NAME, LEGACY_TASK_NAME):
+            unregister = "Unregister-ScheduledTask " + name
+            fallback = "schtasks.exe /Delete /TN " + name + " /F"
+            self.assertIn(unregister, lines)
+            self.assertIn(fallback, lines)
+            self.assertLess(lines.index(unregister), lines.index(fallback))
+
+    def test_uninstall_real_run_fallback_failure_exits_nonzero(self):
+        python_exe = self.make_interpreter(with_pythonw=True)
+        sender = self.make_sender()
+        self.write_filled(python_exe, sender)
+        proc, marker, _ = self.run_script(
+            dry_run=False, uninstall=True,
+            extra_env={"G2C_STUB_UNREGISTER_FAIL": "1",
+                       "G2C_STUB_SCHTASKS_FAIL": "1"})
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        out = proc.stdout
+        self.assertIn("Unregister-ScheduledTask failed: Access is denied.",
+                      out)
+        self.assertIn("The schtasks fallback also failed (exit code 1)", out)
+        self.assertNotIn("Removed scheduled task", out)
+        # The script stops at the first name's failed fallback: exactly one
+        # unregister and one schtasks attempt reached the stubs.
+        lines = self.marker_lines(marker)
+        self.assertEqual(
+            len([line for line in lines
+                 if line.startswith("Unregister-ScheduledTask")]),
+            1, lines)
+        self.assertEqual(
+            len([line for line in lines
+                 if line.startswith("schtasks.exe")]),
+            1, lines)
+
+
+class InstallTaskWindowsScriptTextTest(unittest.TestCase):
+    """Pure file reads of the installer template's non-comment text: pins
+    the user-scoped logon trigger and the fail-loud structure. The stub
+    harness normalizes the child's exit code to 0/1 (see the harness tail
+    comment), so the distinct exit codes 3/4 are pinned here on the script
+    text instead of in a live run."""
+
+    @staticmethod
+    def code_text():
+        with open(TEMPLATE_PATH, encoding="utf-8") as handle:
+            lines = [line for line in handle.read().splitlines()
+                     if not line.lstrip().startswith("#")]
+        return "\n".join(lines)
+
+    def test_logon_trigger_is_scoped_to_the_current_user(self):
+        code = self.code_text()
+        self.assertIn("$LogonUser = $env:USERNAME", code)
+        self.assertIn("-not [string]::IsNullOrEmpty($env:USERDOMAIN)", code)
+        self.assertIn('$LogonUser = "$env:USERDOMAIN\\$env:USERNAME"', code)
+        self.assertIn("New-ScheduledTaskTrigger -AtLogOn -User $LogonUser",
+                      code)
+        self.assertIn("plus fire once at logon of $LogonUser", code)
+        # Fail closed on an unreadable user name instead of registering an
+        # un-scoped (any-user) trigger that needs elevation.
+        self.assertIn("cannot scope the logon trigger to the current user",
+                      code)
+
+    def test_register_and_start_fail_loudly_with_distinct_exit_codes(self):
+        code = self.code_text()
+        self.assertEqual(code.count("exit 3"), 1)
+        self.assertEqual(code.count("exit 4"), 1)
+        # Register, start and the uninstall unregister all run under Stop.
+        self.assertEqual(code.count("-ErrorAction Stop"), 3)
+        self.assertIn("Register-ScheduledTask -TaskName $TaskName"
+                      " -Trigger $trigger, $logonTrigger", code)
+        self.assertIn("Start-ScheduledTask -TaskName $TaskName"
+                      " -ErrorAction Stop", code)
+        self.assertIn("Register-ScheduledTask failed:"
+                      " $($_.Exception.Message)", code)
+        self.assertIn('if ($_.Exception.Message -match "Access is denied") {',
+                      code)
+
+    def test_success_lines_only_after_both_steps_succeed(self):
+        code = self.code_text()
+        order = [
+            code.index("Register-ScheduledTask failed:"
+                       " $($_.Exception.Message)"),
+            code.index("exit 3"),
+            code.index("Start-ScheduledTask failed:"
+                       " $($_.Exception.Message)"),
+            code.index("exit 4"),
+            code.index("Registered and started scheduled task"),
+        ]
+        self.assertEqual(order, sorted(order))
 
 
 if __name__ == "__main__":

@@ -65,6 +65,26 @@ Changed:
   installer, then check that exactly one task `G2C.RunalertsSender`
   exists; re-running the installer without the uninstall would register
   the new name while the legacy task keeps running alongside.
+- The Windows installer registers a per-user logon trigger and fails
+  loudly: `New-ScheduledTaskTrigger -AtLogOn` now carries `-User
+  <DOMAIN\user>`, computed once from `USERDOMAIN`/`USERNAME` (the bare
+  user name when `USERDOMAIN` is empty), because a bare `-AtLogOn` trigger
+  means any user logon and Task Scheduler refuses to register it from a
+  regular (non-elevated) session with "Access is denied" while the old
+  script kept printing its success line. `Register-ScheduledTask` and
+  `Start-ScheduledTask` run with `-ErrorAction Stop` in try/catch: a
+  register failure exits 3, a start failure exits 4, both print the
+  failing step and the exception, and no success line is printed after a
+  failure; a failed start says the task IS registered and names the
+  start/remove commands, and the dry run prints the logon trigger's user.
+  The uninstall path keeps its exit 1 on the schtasks fallback failure and
+  never prints a success line after a failure there either.
+  tests/test_install_task_windows_ps1.py drives the real script through
+  the stub harness for the happy path (the user-scoped trigger
+  parameters), the register "Access is denied" failure and the
+  registered-but-not-started case, pins the uninstall fallback behavior
+  and the exact exit codes statically, and keeps the suite PowerShell 5.1
+  compatible.
 - `install-task-windows.ps1` gained a `-DryRun` switch that reports every
   action the installer would take, each line prefixed `DRY RUN:`, and
   changes nothing (no task register, remove or start, no schtasks call, no

@@ -557,7 +557,15 @@ class SenderCase(unittest.TestCase):
         self.assertNotIn("127.0.0.1", joined)
 
     def test_main_without_ledger_arg_is_clean(self):
-        code = sender.main([])
+        # A machine that really exports G2C_RUNALERTS_LEDGER (seen on
+        # elyyppa01) would otherwise fail this test: main() falls back to
+        # the env var (and then to HERMES_WEBAPP_RUN_ALERTS_OUTBOX) instead
+        # of logging "no ledger given". Remove both keys via
+        # mock.patch.dict, which restores the caller's env on exit.
+        with mock.patch.dict(os.environ):
+            os.environ.pop("G2C_RUNALERTS_LEDGER", None)
+            os.environ.pop("HERMES_WEBAPP_RUN_ALERTS_OUTBOX", None)
+            code = sender.main([])
         self.assertEqual(code, 0)
         self.assertTrue(any("no ledger given" in line for line in self.logs))
 
