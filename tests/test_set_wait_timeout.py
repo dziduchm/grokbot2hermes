@@ -105,6 +105,21 @@ PROFILE_INDENT4 = (
     "    timeout: 700\n"
 )
 
+PROFILE_SHALLOW_LEAF = (
+    "# broken fixture: a leaf-shaped line shallower than the direct children\n"
+    "agent:\n"
+    "    sub:\n"
+    "      x: 1\n"
+    "  clarify_timeout: 90\n"
+)
+PROFILE_DEEP_LEAF_WITH_DIRECT = (
+    "# broken fixture: a direct leaf plus a deeper leaf-shaped line\n"
+    "agent:\n"
+    "  clarify_timeout: 90\n"
+    "  sub:\n"
+    "    clarify_timeout: 99\n"
+)
+
 FAKE_HERMES_SOURCE = """#!/usr/bin/env python3
 # Fake hermes config CLI for the set-wait-timeout tests (record + simulate).
 import json
@@ -309,6 +324,17 @@ class TestSetWaitTimeout(unittest.TestCase):
         self.assertIn("direct children", self._last_err)
         self.assert_no_calls()
 
+    def test_dry_run_refuses_a_leaf_shallower_than_the_children(self):
+        # The child indent comes from the section's first content line; a
+        # leaf-shaped line at ANY other indent (deeper or shallower) cannot
+        # be agent.clarify_timeout and must refuse fail closed.
+        self.write_profile("solo", PROFILE_SHALLOW_LEAF)
+        rc = self.run_script(["--profiles", "solo"])
+        self.assertEqual(rc, 1, self._last_err)
+        self.assertIn("refusing fail closed", self._last_err)
+        self.assertIn("direct children", self._last_err)
+        self.assert_no_calls()
+
     def test_nested_block_without_the_leaf_leaves_the_key_absent(self):
         # The real four-profile installs nest maps under the target sections
         # (e.g. coder's agent.personalities) and the brief pins the real dry
@@ -444,6 +470,19 @@ class TestSetWaitTimeout(unittest.TestCase):
         self.assert_no_calls()
         self.assertFalse(os.path.exists(state_path))
 
+    def test_apply_refuses_a_deeper_leaf_alongside_a_present_direct_leaf(self):
+        # The direct leaf is readable, but a deeper leaf-shaped line under
+        # the same section still refuses: it can never be the direct
+        # child's prior value, and ambiguity loses to refusal.
+        self.write_profile("solo", PROFILE_DEEP_LEAF_WITH_DIRECT)
+        state_path = os.path.join(self.tmp, "state.jsonl")
+        rc = self.run_script(["--apply", "--profiles", "solo", "--state", state_path])
+        self.assertEqual(rc, 1, self._last_err)
+        self.assertIn("refusing fail closed", self._last_err)
+        self.assertIn("direct children", self._last_err)
+        self.assert_no_calls()
+        self.assertFalse(os.path.exists(state_path))
+
     def test_empty_flow_section_counts_as_absent(self):
         self.write_profile("solo", PROFILE_FLOW_EMPTY)
         self.state_path = os.path.join(self.tmp, "state.jsonl")
@@ -475,6 +514,20 @@ class TestSetWaitTimeout(unittest.TestCase):
         self.assertEqual(rc, 0, self._last_err)
         self.assertIn("profile dir missing", self._last_out)
         self.assertIn("agent.clarify_timeout=30", self._last_out)
+
+    def test_dry_run_skips_commands_for_a_missing_profile_dir(self):
+        # Note A: the printed command list must match what --apply would do.
+        # --apply refuses the whole batch when a profile dir is missing, so
+        # the dry run prints the same "profile dir missing" note in the
+        # commands section instead of that profile's commands.
+        self.write_profile("alpha", PROFILE_ALPHA)
+        rc = self.run_script(["--profiles", "alpha,missing-p"])
+        self.assertEqual(rc, 0, self._last_err)
+        self.assertEqual(self._last_out.count("profile dir missing"), 2,
+                         "the note appears once in the priors and once in the commands section")
+        self.assertNotIn("-p missing-p config", self._last_out)
+        self.assertIn("-p alpha config set %s 600" % KEY_CLARIFY, self._last_out)
+        self.assert_no_calls()
 
     def test_custom_profile_list_applies_when_all_profile_dirs_exist(self):
         self.write_profile("alpha", PROFILE_ALPHA)
@@ -554,6 +607,22 @@ class TestSetWaitTimeout(unittest.TestCase):
         rc = self.run_script(["--rollback", self.state_path])
         self.assertEqual(rc, 1)
         self.assertIn("not understood", self._last_err)
+
+    def test_rollback_refuses_a_kind_substring_line(self):
+        # N3: the header skip is the exact header record only. A line that
+        # merely contains the kind text is a malformed record and must be
+        # refused, never silently skipped (an incomplete rollback is worse
+        # than none).
+        self.state_path = os.path.join(self.tmp, "kind-substring.jsonl")
+        with open(self.state_path, "w", encoding="utf-8") as fh:
+            fh.write('{"kind": "g2c-wait-timeout-state", "created_utc": '
+                     '"2026-11-20T10:00:00Z", "wait_timeout": 600}\n')
+            fh.write('{"kind": "g2c-wait-timeout-state", "bogus": true}\n')
+            fh.write('{"profile": "solo", "key": "agent.clarify_timeout", "prior": 1}\n')
+        rc = self.run_script(["--rollback", self.state_path])
+        self.assertEqual(rc, 1, self._last_err)
+        self.assertIn("not understood", self._last_err)
+        self.assert_no_calls()
 
     def test_rollback_refuses_a_state_file_without_a_final_newline(self):
         self.state_path = os.path.join(self.tmp, "truncated.jsonl")

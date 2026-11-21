@@ -508,6 +508,17 @@ cmd_apply() {
 
 # --- rollback -----------------------------------------------------------------
 
+# is_state_header_line <line>: exit 0 only when <line> IS the state file
+# header record, anchored at both ends (the exact shape cmd_apply writes).
+# Shared by the --rollback entry check and the rollback loop: a line is
+# skipped as the header on this exact shape only, so a line that merely
+# CONTAINS the kind substring falls through to the record parser and is
+# refused there (an incomplete rollback is worse than none).
+is_state_header_line() {
+    printf '%s\n' "$1" |
+        grep -qE "^\{\"kind\": \"$STATE_KIND\", \"created_utc\": \"[^\"]{1,40}\", \"wait_timeout\": [0-9]{1,5}\}$"
+}
+
 parse_state_line() {
     # parse_state_line <line> -> echoes "profile|key|prior"; empty when the
     # line is not a restore record (header lines and blank lines are skipped
@@ -536,10 +547,14 @@ cmd_rollback() {
             '')
                 continue
                 ;;
-            '{'*'"kind": "'"$STATE_KIND"'"'*)
-                continue
-                ;;
         esac
+        # N3: the header is skipped on the EXACT header shape only (the
+        # shared is_state_header_line check above); a line that merely
+        # contains the kind substring falls through to the record parser
+        # and is refused instead of being silently skipped.
+        if is_state_header_line "$line"; then
+            continue
+        fi
         parsed=$(parse_state_line "$line")
         if [ -z "$parsed" ]; then
             die 1 "state file line $lineno is not understood: $line (refusing: an incomplete rollback is worse than none)"
@@ -600,6 +615,13 @@ cmd_dry_run() {
     IFS=,
     for p in $profiles; do
         IFS=$IFS_backup
+        # Transcript parity with --apply: the batch refuses when a named
+        # profile dir is missing, so the dry run prints the same note here
+        # instead of commands that nothing would run.
+        if [ ! -d "$PROFILE_ROOT/$p" ]; then
+            printf '    %-14s profile dir missing: %s\n' "$p" "$PROFILE_ROOT/$p"
+            continue
+        fi
         printf '  %s -p %s config set %s %s\n' "$HERMES_BIN" "$p" "$KEY_CLARIFY" "$wait_timeout"
         printf '  %s -p %s config set %s %s\n' "$HERMES_BIN" "$p" "$KEY_APPROVALS" "$wait_timeout"
         printf '  %s -p %s config get %s   # verify: prints %s\n' "$HERMES_BIN" "$p" "$KEY_CLARIFY" "$wait_timeout"
@@ -668,7 +690,7 @@ if [ -n "$rollback_file" ]; then
         die 1 "state file not found: $rollback_file"
     fi
     firstline=$(head -n 1 "$rollback_file")
-    printf '%s' "$firstline" | grep -qE "^\{\"kind\": \"$STATE_KIND\", \"created_utc\": \"[^\"]{1,40}\", \"wait_timeout\": [0-9]{1,5}\}$" \
+    is_state_header_line "$firstline" \
         || die 1 "state file does not look like a $STATE_KIND record: $rollback_file"
     cmd_rollback
     exit 0

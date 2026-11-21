@@ -264,6 +264,14 @@ Defaults: profiles `coder,code-reviewer,imilk,researcher`; valid range
 make a deliberate edit instead). A profile that still sets the legacy
 `clarify.timeout` key makes the run refuse (`--also-legacy` to point that key
 at the same value too; the unset ones are left to `agent.clarify_timeout`).
+Profile names are validated before anything runs (`[a-z0-9-]+`, no leading
+dash, no duplicates, no empty items; exit 2), and `--apply` refuses the whole
+batch when any named profile dir is missing under the profile root (a typo
+would otherwise make `hermes config set` create a junk profile); the dry run
+prints those profiles as `profile dir missing` in the prior list and the
+command list instead of inventing commands for them. Rollback replays the
+recorded priors from the state file `--apply` wrote (0600 JSONL, one record
+per touched key; `--state` chooses where it lives).
 Run it without `--apply` for a dry run: it prints the prior values (read from
 the profiles' raw `config.yaml`, so seeded defaults are not mistaken for
 user-set ones) and the exact commands. Exit codes: 0 ok, 1 refusal/failure,
@@ -288,6 +296,17 @@ port). Equivalent manual commands per profile (then verify with get):
 
 (or run `runalerts/set-wait-timeout.sh` under Git Bash/WSL, which macOS and
 Linux use directly; the script's awk/sed usage is POSIX).
+
+Known limits: the prior-value reader is line-based block YAML. Alias and
+merge keys (`<<`, `*`, `&`) are not consulted, so a profile that injects the
+two keys through one of them must set them explicitly. Flow-style section
+values are understood only as the empty single-line map (`agent: {}` counts
+as absent there); a single-line flow value naming a key of interest refuses,
+as does any multi-line flow value. The rollback parser accepts only the exact
+header record and the exact profile/key/prior record lines (a line that
+merely contains the header's kind text is refused, never skipped) and
+restores only what `--apply` recorded; it is not a YAML editor and never
+touches the profile files themselves.
 
 ## Rollback
 

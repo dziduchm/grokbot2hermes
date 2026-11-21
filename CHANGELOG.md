@@ -75,10 +75,19 @@ Added:
   config per waiter creation and the loader cache is signature-keyed
   (stat + content digest); waiters created before a change keep their window.
   POSIX/bash-3.2, bash-echoed every write; documented in the runalerts README
-  ("Wait timeout") and covered by `tests/test_set_wait_timeout.py` (18 tests,
+  ("Wait timeout") and covered by `tests/test_set_wait_timeout.py` (31 tests,
   unittest-compatible, fake-hermes stub, POSIX legs). Windows parity this
   round is a README note with the equivalent per-profile `hermes config set`
   commands instead of a .ps1 port.
+- Wait timeout installer, hardening round 2: the dry-run command list now
+  matches `--apply` for a missing profile dir (the same `profile dir missing`
+  note replaces that profile's commands), the raw prior reader's refusal of a
+  leaf-shaped line at any indent other than the section's direct-child indent
+  (shallower or deeper, with or without a present direct leaf) is pinned by
+  suite tests, and `--rollback` skips the state-file header on the exact
+  header record only: a line that merely contains the kind text is refused
+  instead of skipped. The known limits (alias/merge keys, flow-style values,
+  exact-record rollback parsing) are documented in the runalerts README.
 
 Changed:
 
