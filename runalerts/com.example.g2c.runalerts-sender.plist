@@ -24,7 +24,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.md.g2c.runalerts-sender</string>
+    <string>com.example.g2c.runalerts-sender</string>
 
     <key>ProgramArguments</key>
     <array>

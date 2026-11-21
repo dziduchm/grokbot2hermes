@@ -6,7 +6,7 @@
 #
 #   powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1
 #
-# It creates a per-user scheduled task "ComMdG2c.RunalertsSender" that fires
+# It creates a per-user scheduled task "G2C.RunalertsSender" that fires
 # every minute while you are logged on (starting on logon) and runs the
 # resolved interpreter (pythonw.exe preferred, see below) with
 # <sender.py> --log-file <log> --ticks 4 --tick-interval 15: four sender
@@ -30,9 +30,17 @@
 # Uninstall (removes the task only; ledger, webhook file and logs stay):
 #   powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -Uninstall
 #
+# Installs made with an older script registered the task under this
+# legacy name "ComMdG2c.RunalertsSender"; those existing installs need no
+# change and the -Uninstall run below removes both names (the registered
+# one first). Re-running the installer registers the new name while the
+# legacy task keeps running alongside until it is removed.
+#
 # If Unregister-ScheduledTask refuses with Access Denied (seen in a filtered
 # admin / Medium IL session), delete the same task with:
-#   schtasks /Delete /TN ComMdG2c.RunalertsSender /F
+#   schtasks /Delete /TN G2C.RunalertsSender /F
+# (for an install made with an older script the manual fallback names
+# the legacy name /TN ComMdG2c.RunalertsSender instead)
 #
 # Placeholders:
 #   $SenderPython : e.g. "C:\Users\me\AppData\Local\Programs\Python\Python39\python.exe"
@@ -44,7 +52,10 @@ param(
     [switch]$Uninstall
 )
 
-$TaskName = "ComMdG2c.RunalertsSender"
+$TaskName = "G2C.RunalertsSender"
+# Installs made with an older script registered the task under this legacy
+# name; the -Uninstall block below removes it too (see the header note).
+$LegacyTaskName = "ComMdG2c.RunalertsSender"
 
 # ---- placeholders (edit me) -------------------------------------------------
 $SenderPython = "__SENDER_PYTHON__"
@@ -53,26 +64,28 @@ $LogPath      = Join-Path $env:APPDATA "G2C\g2c-runalerts-sender.log"
 # -----------------------------------------------------------------------------
 
 if ($Uninstall) {
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        try {
-            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
-            Write-Output "Removed scheduled task $TaskName"
-        } catch {
-            # Unregister-ScheduledTask is refused with Access Denied in a
-            # filtered admin / Medium IL session; schtasks deletes the same
-            # task from the same session.
-            Write-Output "Unregister-ScheduledTask failed: $($_.Exception.Message)"
-            Write-Output "Falling back to: schtasks /Delete /TN $TaskName /F"
-            & schtasks.exe /Delete /TN $TaskName /F
-            if ($LASTEXITCODE -eq 0) {
-                Write-Output "Removed scheduled task $TaskName (schtasks fallback)"
-            } else {
-                Write-Output "The schtasks fallback also failed (exit code $LASTEXITCODE); remove the task manually or retry the -Uninstall script"
-                exit 1
+    foreach ($task in @($TaskName, $LegacyTaskName)) {
+        if (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue) {
+            try {
+                Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction Stop
+                Write-Output "Removed scheduled task $task"
+            } catch {
+                # Unregister-ScheduledTask is refused with Access Denied in a
+                # filtered admin / Medium IL session; schtasks deletes the same
+                # task from the same session.
+                Write-Output "Unregister-ScheduledTask failed: $($_.Exception.Message)"
+                Write-Output "Falling back to: schtasks /Delete /TN $task /F"
+                & schtasks.exe /Delete /TN $task /F
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Output "Removed scheduled task $task (schtasks fallback)"
+                } else {
+                    Write-Output "The schtasks fallback also failed (exit code $LASTEXITCODE); remove the task manually or retry the -Uninstall script"
+                    exit 1
+                }
             }
+        } else {
+            Write-Output "Task $task not present: nothing to remove"
         }
-    } else {
-        Write-Output "Task $TaskName not present: nothing to remove"
     }
     exit 0
 }

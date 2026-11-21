@@ -226,9 +226,14 @@ Remove: `powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windo
 If `Unregister-ScheduledTask` is refused with Access Denied (seen in a filtered
 admin / Medium IL session), delete the task from the same session:
 
-    schtasks /Delete /TN ComMdG2c.RunalertsSender /F
+    schtasks /Delete /TN G2C.RunalertsSender /F
 
-That removes the task only; the ledger, the webhook file and the logs stay.
+Existing installs registered under the old task name `ComMdG2c.RunalertsSender`
+keep working unchanged and need no change. Re-running the installer registers
+the new name (the legacy task keeps running alongside until removed with the
+`-Uninstall` above, which removes both names; on such an install the manual
+fallback names `/TN ComMdG2c.RunalertsSender`). Either way that removes the
+task only; the ledger, the webhook file and the logs stay.
 
 How the cadence works on Windows: the task trigger repeats every 1 minute
 (Task Scheduler rejects any sub-minute repetition interval, such as a
@@ -325,8 +330,12 @@ touches the profile files themselves.
   `com.md.g2c.runalerts-sender.plist` name) and delete the
   plist from `~/Library/LaunchAgents`. On Windows:
   `powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -Uninstall`,
-  and when that is refused with Access Denied, `schtasks /Delete /TN ComMdG2c.RunalertsSender /F`
-  removes the task only (ledger, webhook file and logs stay).
+  and when that is refused with Access Denied,
+  `schtasks /Delete /TN G2C.RunalertsSender /F` removes the task only (ledger,
+  webhook file and logs stay). An existing install registered under the old
+  task name `ComMdG2c.RunalertsSender` needs the same removal: the same
+  `-Uninstall` covers both names, else
+  `schtasks /Delete /TN ComMdG2c.RunalertsSender /F`.
   On Linux: remove the crontab line or `systemctl --user disable --now` the
   timer unit.
 - Turn the emitter off: remove the `webapp.run_alerts` block from the gateway's

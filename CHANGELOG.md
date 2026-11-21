@@ -24,6 +24,19 @@ Changed:
   `com.example.g2c.runalerts-sender`; every reference updated. Fresh installs
   use the new name; existing installs registered under the old
   `com.md.g2c.runalerts-sender` label keep working with no change.
+- Windows Task Scheduler template: the installer registers the per-user task
+  under the neutral name `G2C.RunalertsSender` (it was
+  `ComMdG2c.RunalertsSender`). Existing Windows installs stay registered
+  under the old name and need no change: `-Uninstall` removes both names
+  (the same Unregister-ScheduledTask-then-`schtasks /Delete /F` fallback
+  applied per name), re-running the installer registers the new name, and
+  the runalerts README documents the manual fallback for both.
+- Static guard tests: the launchd template's Label must equal the label its
+  filename carries (it now really does) and the template must contain no
+  `com.md.g2c` string; a tracked-tree scan bounds every remaining
+  `com.md.g2c` / `ComMdG2c` occurrence to CHANGELOG history or a
+  legacy-removal/compatibility line, and the installer's uninstall must walk
+  both the registered and the legacy task name.
 - .gitignore: local run artifacts and caches (`*.jsonl`, `*.log`, `.venv*/`,
   `.pytest_cache/`, `.ruff_cache/`) and key material (`secrets/`, `*.pem`,
   `*.key`, `*.p12`) are ignored; no tracked file matches any new pattern.
