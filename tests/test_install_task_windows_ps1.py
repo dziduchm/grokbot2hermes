@@ -4,10 +4,16 @@ Two layers:
 
 - InstallTaskWindowsDryRunTest drives the real script in a temporary filled
   copy under a stub harness: stub functions named New-Item,
-  Register-ScheduledTask, Unregister-ScheduledTask, Start-ScheduledTask and
-  schtasks shadow the real cmdlets and append to a marker file, so the test
-  proves -DryRun changes nothing (empty marker, no log directory created)
-  while reporting the expected DRY RUN lines. These tests skip without a
+  Register-ScheduledTask, Unregister-ScheduledTask, Start-ScheduledTask,
+  schtasks.exe and schtasks shadow the real commands and append to a marker
+  file, so the test proves -DryRun changes nothing (empty marker, no log
+  directory created) while reporting the expected DRY RUN lines. The stub
+  must be named schtasks.exe because PowerShell resolves commands by exact
+  name and the script's uninstall fallback calls & schtasks.exe; the
+  negative control test runs a scratch child script under the harness that
+  calls & schtasks.exe /Query and asserts the marker line fires, proving
+  the stub owns that token and the real exe never runs. These tests skip
+  without a
   PowerShell host: pwsh anywhere, or powershell.exe on Windows. No real
   scheduled task, launchctl agent or machine state is ever touched: the
   script sees only the temporary directory (overridden APPDATA).
@@ -60,14 +66,39 @@ function Start-ScheduledTask {
     Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value "Start-ScheduledTask $TaskName"
 }
 
+# PowerShell resolves commands by exact name: the uninstall fallback calls
+# & schtasks.exe, so the stub must carry the .exe suffix to own that token
+# (a function named schtasks never intercepts it). Both spellings stub into
+# the marker, so any spelling of a future external-tool call is caught.
+function schtasks.exe {
+    param($ArgumentList)
+    Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value "schtasks.exe $ArgumentList"
+}
+
 function schtasks {
     param($ArgumentList)
-    Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value "schtasks"
+    Add-Content -LiteralPath $env:G2C_DRYRUN_MARKER -Value "schtasks $ArgumentList"
 }
 
 & (Join-Path $PSScriptRoot "install-task-windows.filled.ps1") -DryRun:$DryRun -Uninstall:$Uninstall
 if ($?) { exit 0 } else { exit 1 }
 """
+
+# Negative control for mitch-dryrun-review.md LOW 1: the stub names the exact
+# token the script's uninstall fallback calls (& schtasks.exe), and a scratch
+# child script under the harness makes that exact call. Only the stub can
+# write the marker line, so the marker firing proves the function owns the
+# .exe token and the real exe never ran; a stub-name drift would leave the
+# marker empty (real exe on Windows, command-not-found elsewhere) and the
+# test would go red on the marker and the exit code instead.
+NEGCTL_SCRATCH = """\\
+& schtasks.exe /Query
+"""
+
+NEGCTL_HARNESS = STUB_HARNESS.replace(
+    '& (Join-Path $PSScriptRoot "install-task-windows.filled.ps1")'
+    ' -DryRun:$DryRun -Uninstall:$Uninstall',
+    '& (Join-Path $PSScriptRoot "negctl.scratch.ps1")')
 
 
 def find_powershell():
@@ -282,6 +313,31 @@ class InstallTaskWindowsDryRunTest(unittest.TestCase):
                 "missing DRY RUN line naming %s in %r" % (name, dryrun_lines))
         self.assertNotIn("Removed scheduled task", proc.stdout)
         self.assertEqual(self.marker_text(marker), "")
+
+    def test_negative_control_schtasks_stub_owns_the_exe_token(self):
+        # The uninstall fallback calls & schtasks.exe and PowerShell resolves
+        # commands by exact name, so the stub must be named schtasks.exe.
+        # The scratch child script under the harness makes that exact call;
+        # the marker line can only come from the stub, so the assertion
+        # proves the stub owns the .exe token and the real exe never ran.
+        # Without the stub the real spelling fails as command-not-found on a
+        # non-Windows host (non-zero exit) and on Windows would leave the
+        # marker empty: both shapes go red here.
+        scratch = os.path.join(self.tmp, "negctl.scratch.ps1")
+        with open(scratch, "w", encoding="utf-8", newline="") as handle:
+            handle.write(NEGCTL_SCRATCH)
+        harness = os.path.join(self.tmp, "harness-negctl.ps1")
+        with open(harness, "w", encoding="utf-8", newline="") as handle:
+            handle.write(NEGCTL_HARNESS)
+        marker = os.path.join(self.tmp, "marker-negctl.txt")
+        env = dict(os.environ)
+        env["G2C_DRYRUN_MARKER"] = marker
+        args = [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", harness]
+        proc = subprocess.run(args, env=env, capture_output=True,
+                              text=True, timeout=600)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.marker_text(marker), "schtasks.exe /Query")
 
 
 class InstallTaskWindowsDryRunDocsTest(unittest.TestCase):
