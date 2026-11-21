@@ -204,6 +204,28 @@ def profile_ops(calls, profile, sub, key):
     return values
 
 
+def locale_available(name):
+    """True when the system's `locale -a` listing carries <name>, compared
+    dash/underscore-insensitively (glibc lists en_US.utf8 where macOS lists
+    en_US.UTF-8 and both setlocale spellings are equivalent)."""
+    try:
+        proc = subprocess.run(
+            ["locale", "-a"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30,
+        )
+    except OSError:
+        return False
+
+    def key(part):
+        return part.lower().replace("-", "").replace("_", "")
+
+    wanted = key(name)
+    return any(
+        key(line.strip()) == wanted
+        for line in proc.stdout.decode("utf-8", "replace").splitlines()
+    )
+
+
 @unittest.skipUnless(shutil.which("bash"), "bash shell not on PATH")
 @unittest.skipIf(sys.platform == "win32", "POSIX script; Windows parity is documented, not tested here")
 class TestSetWaitTimeout(unittest.TestCase):
@@ -239,7 +261,7 @@ class TestSetWaitTimeout(unittest.TestCase):
         self.write_profile("imilk", PROFILE_IMILK)
         self.write_profile("researcher", PROFILE_RESEARCHER)
 
-    def run_script(self, args):
+    def run_script(self, args, extra_env=None):
         env = os.environ.copy()
         env["HOME"] = self.tmp
         env["TMPDIR"] = self.tmpdir
@@ -247,6 +269,11 @@ class TestSetWaitTimeout(unittest.TestCase):
         env["HERMES_BIN"] = self.stub
         env["FAKE_HERMES_LOG"] = self.log
         env["FAKE_HERMES_STATE"] = self.stub_state
+        # extra_env lands AFTER the controlled env: the point is to be able
+        # to force a hostile locale (LC_ALL/LANG) into the subprocess env,
+        # mirroring what the CI runners set.
+        for key, value in (extra_env or {}).items():
+            env[key] = value
         proc = subprocess.run(
             ["bash", SCRIPT_PATH] + list(args),
             env=env, cwd=self.tmp,
@@ -421,6 +448,27 @@ class TestSetWaitTimeout(unittest.TestCase):
         for bad in ["A,b", "a,,b", "a,a", "a b", "a/.."]:
             rc = self.run_script(["--apply", "--profiles", bad])
             self.assertEqual(rc, 2, repr(bad))
+            self.assertIn("FAIL", self._last_err)
+        self.assert_no_calls()
+
+    def test_profile_name_validation_under_en_us_utf8_locale(self):
+        # CI regression (run 44902030637, both macos-latest legs): bash case
+        # bracket RANGES collate by locale, so under LC_ALL=en_US.UTF-8 the
+        # old [!a-z0-9-] class admitted 'A' and 'A,b' validated (surfacing
+        # only as a later missing-profile-dir refusal, rc 1). The script now
+        # pins LC_ALL=C AND enumerates the profile-name class explicitly;
+        # this test forces the hostile locale into the subprocess env and
+        # demands exit 2 with zero hermes calls.
+        if not locale_available("en_US.UTF-8"):
+            self.skipTest("en_US.UTF-8 locale not available on this machine")
+        self.write_default_profiles()
+        for bad in ["A,b", "Code-Reviewer", "abC9-"]:
+            rc = self.run_script(
+                ["--apply", "--profiles", bad],
+                extra_env={"LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"},
+            )
+            self.assertEqual(rc, 2, repr(bad))
+            self.assertIn("invalid profile name", self._last_err)
             self.assertIn("FAIL", self._last_err)
         self.assert_no_calls()
 

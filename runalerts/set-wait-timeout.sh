@@ -31,6 +31,17 @@
 
 set -u
 
+# Locale-proofing: bracket RANGES in bash case patterns, awk, sed and grep
+# collate by locale. Under LC_ALL=en_US.UTF-8 (CI macOS runners) the [a-z]
+# span inside the profile-name case class below silently admitted 'A', so
+# 'A,b' validated and only died later with exit 1 (missing profile dir, CI
+# run 44902030637) instead of the intended exit 2. Pin C collation for the
+# whole script and every child (awk/sed/grep ranges become byte-wise), and
+# spell the profile-name class out explicitly so that guard holds even in
+# an environment that forces a collation around this pin.
+LC_ALL=C
+export LC_ALL
+
 DEFAULT_PROFILES="coder,code-reviewer,imilk,researcher"
 KEY_CLARIFY="agent.clarify_timeout"
 KEY_APPROVALS="approvals.timeout"
@@ -138,7 +149,7 @@ validate_profiles() {
             -*)
                 die 2 "profile name '$name' must not start with '-' (it could swallow the next option or reach hermes as a flag)"
                 ;;
-            ''|*[!a-z0-9-]*)
+            ''|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*)
                 die 2 "invalid profile name '$name' (allowed: [a-z0-9-]+)"
                 ;;
         esac
