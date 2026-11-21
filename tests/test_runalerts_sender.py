@@ -11,6 +11,7 @@ import importlib.util
 import json
 import logging
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -1156,11 +1157,14 @@ class SenderCase(unittest.TestCase):
 
     def test_default_webhook_constant_is_relative_never_absolute(self):
         # Audit sweep: no absolute owner path may ship in this repo, not even
-        # in the default path constant.
+        # in the default path constant. The constant ships as the POSIX form,
+        # so the expected value is a forward-slash literal: building it with
+        # os.path.join emits backslash separators on the Windows legs. Both
+        # isabs variants must agree the constant is never absolute.
         self.assertFalse(os.path.isabs(sender.DEFAULT_WEBHOOK_RELATIVE))
+        self.assertFalse(posixpath.isabs(sender.DEFAULT_WEBHOOK_RELATIVE))
         self.assertEqual(sender.DEFAULT_WEBHOOK_RELATIVE,
-                         os.path.join(".bfc-pipeline", "secrets",
-                                      "g2c-grokbot-webhook.json"))
+                         ".bfc-pipeline/secrets/g2c-grokbot-webhook.json")
 
     def test_default_webhook_resolves_under_faked_home(self):
         # The POSIX default resolves under Path.home() at call time, so a
