@@ -203,8 +203,9 @@ removing or starting anything and without writing any file. The dry run exits
 non-zero only when the placeholders are still unfilled; placeholder state,
 path existence, the pythonw.exe choice or the python.exe fallback warning,
 the `G2C_RUNALERTS_LEDGER` check, the log directory it would create, the
-task name, the exact action (executable plus argument string), triggers,
-settings and the would-be register and start are all reported. With
+the task name, the exact action (executable plus argument string), triggers
+(the logon trigger names its user), settings and the would-be register and
+start are all reported. With
 `-Uninstall -DryRun` it checks, read only via `Get-ScheduledTask`, which of
 the two task names are present and would be removed; on hosts without the
 ScheduledTasks cmdlets (for example pwsh on Linux or macOS) it says so and
@@ -221,6 +222,29 @@ a warning that a console window may appear each minute. The task is registered
 Hidden as well, which hides it in the Task Scheduler UI tree; pythonw.exe is
 what suppresses the console window, so both are required. Re-running the
 installer keeps the silent shape: it registers no visible-window task.
+
+The trigger pair is a one-minute repetition plus a per-user logon trigger
+scoped to the current user: `-AtLogOn -User <DOMAIN\user>`, computed once
+from `USERDOMAIN` and `USERNAME` (when `USERDOMAIN` is empty the bare user
+name is used, and when both are unavailable the dry run says so while the
+real run refuses). A bare `-AtLogOn` trigger means any user logon, and
+Task Scheduler refuses to register that from a regular session with
+"Access is denied"; the per-user form is what makes the install work
+without elevation.
+
+Failures fail loudly: `Register-ScheduledTask` and `Start-ScheduledTask`
+run with `-ErrorAction Stop` in try/catch. A register failure exits 3, a
+start failure exits 4, both print the failing step and the exception
+message and never print a success line ("Registered and started ..."). An
+"Access is denied" from `Register-ScheduledTask` usually means an any-user
+logon trigger or another elevated-only setting. When registration
+succeeded but the start failed, the message says the task IS registered
+and names the manual `Start-ScheduledTask` command and the remove commands
+(`-Uninstall`, or `schtasks /Delete /TN G2C.RunalertsSender /F`). Re-run
+the installer after fixing the cause: a failed register leaves nothing
+registered (a name-already-exists failure wants the `-Uninstall` first),
+and a failed start needs the task started or removed before a clean
+re-run.
 
 Pin provenance (documentation only, recommended): a pinned sender copy drifts
 from the repo checkout, so when you pin sender.py on the Windows box, write a
