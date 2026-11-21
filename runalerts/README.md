@@ -55,7 +55,7 @@ Safety rails (built in, none are configurable):
 | --- | --- |
 | `runalerts/sender.py` | the stdlib sender: gate, per-key POST, self-test, multi-tick loop (`--self-test`, `--ledger`, `--webhook`, `--notify-closed`, `--ticks`, `--tick-interval`) |
 | `runalerts/com.example.g2c.runalerts-sender.plist` | macOS launchd timer template (paths only, no secrets) |
-| `runalerts/install-task-windows.ps1` | Windows Task Scheduler installer template (edit two placeholder paths, review, run) |
+| `runalerts/install-task-windows.ps1` | Windows Task Scheduler installer template (edit two placeholder paths, review, dry run with `-DryRun`, run) |
 | `tests/test_runalerts_sender.py` | sender test suite (unittest, loopback mock) |
 
 ## Step 1: configure the gateway side (on the machine that runs the gateway)
@@ -197,6 +197,21 @@ regular (non-admin) PowerShell window in the repo checkout:
     setx G2C_RUNALERTS_LEDGER "C:\path\to\alerts.jsonl"
     powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1
 
+Dry run first: add `-DryRun` to that command to report every action the
+installer would take, each line prefixed `DRY RUN:`, without registering,
+removing or starting anything and without writing any file. The dry run exits
+non-zero only when the placeholders are still unfilled; placeholder state,
+path existence, the pythonw.exe choice or the python.exe fallback warning,
+the `G2C_RUNALERTS_LEDGER` check, the log directory it would create, the
+task name, the exact action (executable plus argument string), triggers,
+settings and the would-be register and start are all reported. With
+`-Uninstall -DryRun` it checks, read only via `Get-ScheduledTask`, which of
+the two task names are present and would be removed; on hosts without the
+ScheduledTasks cmdlets (for example pwsh on Linux or macOS) it says so and
+lists both names as would-be checked. Filling the two placeholder paths and
+pinning the `sender.py` copy next to it are manual steps the dry run
+validates; the script itself copies no files and replaces no placeholders.
+
 How the task stays silent: the installer registers pythonw.exe as the
 executable whenever pythonw.exe sits next to the filled python.exe placeholder
 (a filled pythonw.exe path is used as-is; any other interpreter passes through
@@ -229,11 +244,14 @@ admin / Medium IL session), delete the task from the same session:
     schtasks /Delete /TN G2C.RunalertsSender /F
 
 Existing installs registered under the old task name `ComMdG2c.RunalertsSender`
-keep working unchanged and need no change. Re-running the installer registers
-the new name (the legacy task keeps running alongside until removed with the
-`-Uninstall` above, which removes both names; on such an install the manual
-fallback names `/TN ComMdG2c.RunalertsSender`). Either way that removes the
-task only; the ledger, the webhook file and the logs stay.
+keep working unchanged and need no change. To migrate such an install to the
+new name, run the `-Uninstall` command first: it removes both names, including
+a freshly registered new one. Then re-run the installer, then check that
+exactly one task `G2C.RunalertsSender` exists; re-running the installer
+without that uninstall would register the new name while the legacy task
+keeps running alongside. On such an install the manual fallback names the
+legacy task `/TN ComMdG2c.RunalertsSender`. The `-Uninstall` removes the task
+only; the ledger, the webhook file and the logs stay.
 
 How the cadence works on Windows: the task trigger repeats every 1 minute
 (Task Scheduler rejects any sub-minute repetition interval, such as a

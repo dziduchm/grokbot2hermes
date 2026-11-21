@@ -27,6 +27,28 @@
 # runalerts/README.md Step 3) and the ledger path comes from the
 # G2C_RUNALERTS_LEDGER user environment variable.
 #
+# Dry run first: add -DryRun to report every action the script would take
+# and change nothing - no task registration, removal or start, no schtasks,
+# no directory creation, no file writes:
+#   powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -DryRun
+# Every report line carries a "DRY RUN:" prefix: the placeholder check
+# (unfilled placeholders are reported and the run exits non-zero instead of
+# throwing), path existence, the interpreter resolution (pythonw.exe chosen
+# when it sits next to the filled python.exe, the python.exe fallback
+# warning when it does not), the G2C_RUNALERTS_LEDGER user-variable check,
+# the log directory it would create, the exact task name, the action
+# (executable plus full argument string), the triggers, the settings (Hidden,
+# IgnoreNew, 55-second execution time limit) and that it would register and
+# start the task. With -Uninstall -DryRun it reports which of the two task
+# names are present and would be removed (a read-only check; when the
+# ScheduledTasks cmdlets are unavailable, e.g. on non-Windows hosts, it says
+# so and lists both names as would-be checked). The run exits non-zero only
+# for unfilled placeholders; every other cannot-verify case is reported and
+# leaves the exit code at 0.
+# Filling the two placeholders below and pinning the sender.py copy next to
+# it are manual steps the dry run validates; the script itself copies no
+# files and replaces no placeholders.
+#
 # Uninstall (removes the task only; ledger, webhook file and logs stay):
 #   powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -Uninstall
 #
@@ -34,7 +56,10 @@
 # legacy name "ComMdG2c.RunalertsSender"; those existing installs need no
 # change and the -Uninstall run below removes both names (the registered
 # one first). Re-running the installer registers the new name while the
-# legacy task keeps running alongside until it is removed.
+# legacy task keeps running alongside. To migrate such an install, run
+# -Uninstall first (it removes both names, including a freshly registered
+# new one), then re-run the installer, then check that exactly one task
+# G2C.RunalertsSender exists.
 #
 # If Unregister-ScheduledTask refuses with Access Denied (seen in a filtered
 # admin / Medium IL session), delete the same task with:
@@ -47,10 +72,21 @@
 #                   (a pythonw.exe path works too; the installer prefers the
 #                   pythonw.exe sitting next to the filled python.exe)
 #   $SenderScript : e.g. "C:\Users\me\src\GrokBot2Hermes\runalerts\sender.py"
+#
+# Both placeholder lines are filled by hand and the sender.py copy is pinned
+# by hand: the script performs no file copies and no placeholder replacement;
+# the -DryRun run validates that the filled paths exist.
 
 param(
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$DryRun
 )
+
+# Every dry-run report line goes through this single helper so a dry-run
+# transcript can be told apart from a real run's output at a glance.
+function Write-DryRun([string]$Message) {
+    Write-Output "DRY RUN: $Message"
+}
 
 $TaskName = "G2C.RunalertsSender"
 # Installs made with an older script registered the task under this legacy
@@ -64,6 +100,26 @@ $LogPath      = Join-Path $env:APPDATA "G2C\g2c-runalerts-sender.log"
 # -----------------------------------------------------------------------------
 
 if ($Uninstall) {
+    if ($DryRun) {
+        # Read-only report: names and presence only, nothing is unregistered
+        # or deleted. Get-Command probes for the ScheduledTasks cmdlets
+        # instead of calling them, so a host without the module (pwsh on
+        # Linux or macOS) gets a plain report naming both task names.
+        if ($null -eq (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+            Write-DryRun "the ScheduledTasks cmdlets are not available on this host, so task presence cannot be read here; the real uninstall would check both names and remove whichever task is present:"
+            Write-DryRun "would check, and remove if present: $TaskName"
+            Write-DryRun "would check, and remove if present: $LegacyTaskName"
+            exit 0
+        }
+        foreach ($task in @($TaskName, $LegacyTaskName)) {
+            if (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue) {
+                Write-DryRun "task $task is present and would be removed (the same Unregister-ScheduledTask then schtasks /Delete /F fallback per name as a real uninstall)"
+            } else {
+                Write-DryRun "task $task is not present: nothing to remove"
+            }
+        }
+        exit 0
+    }
     foreach ($task in @($TaskName, $LegacyTaskName)) {
         if (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue) {
             try {
@@ -90,12 +146,28 @@ if ($Uninstall) {
     exit 0
 }
 
+# Unfilled placeholders are the one condition a dry run fails on: they are a
+# pure file-content mistake, while every other cannot-verify case is reported
+# and leaves the exit code at 0.
+$DryRunPlaceholderProblem = $false
 foreach ($path in @($SenderPython, $SenderScript)) {
     if ($path -like "__*__") {
-        throw "Edit the placeholder values in this script first (see the header)"
+        if ($DryRun) {
+            Write-DryRun "placeholder not filled: $path (edit the placeholder values in this script first, see the header)"
+            $DryRunPlaceholderProblem = $true
+        } else {
+            throw "Edit the placeholder values in this script first (see the header)"
+        }
+        continue
     }
     if (-not (Test-Path -LiteralPath $path)) {
-        throw "Not found: $path"
+        if ($DryRun) {
+            Write-DryRun "path not found: $path"
+        } else {
+            throw "Not found: $path"
+        }
+    } elseif ($DryRun) {
+        Write-DryRun "path exists: $path"
     }
 }
 
@@ -111,19 +183,73 @@ if ($PythonLeaf -eq "python.exe") {
     $PythonwPath = Join-Path (Split-Path -Parent $SenderPython) "pythonw.exe"
     if (Test-Path -LiteralPath $PythonwPath) {
         $SenderPythonResolved = $PythonwPath
-        Write-Output "Using pythonw.exe so the scheduled run opens no console window: $PythonwPath"
+        if ($DryRun) {
+            Write-DryRun "would choose pythonw.exe so the scheduled run opens no console window: $PythonwPath"
+        } else {
+            Write-Output "Using pythonw.exe so the scheduled run opens no console window: $PythonwPath"
+        }
     } else {
-        Write-Output "pythonw.exe not found next to the filled python.exe: a console window may appear each minute"
+        if ($DryRun) {
+            Write-DryRun "pythonw.exe not found next to the filled python.exe: the real run would register python.exe and warn that a console window may appear each minute"
+        } else {
+            Write-Output "pythonw.exe not found next to the filled python.exe: a console window may appear each minute"
+        }
     }
 }
 
-if ([Environment]::GetEnvironmentVariable("G2C_RUNALERTS_LEDGER", "User") -eq $null) {
-    throw "Set the user environment variable G2C_RUNALERTS_LEDGER first: setx G2C_RUNALERTS_LEDGER ""C:\path\to\alerts.jsonl"""
+# The User environment-variable scope exists on Windows only; reading it
+# throws on hosts without one (pwsh on Linux or macOS). A dry run there
+# reports that the check cannot run locally instead of crashing mid-report;
+# a real run keeps refusing fail-closed.
+$LedgerValue = $null
+$LedgerUserScopeReadable = $true
+try {
+    $LedgerValue = [Environment]::GetEnvironmentVariable("G2C_RUNALERTS_LEDGER", "User")
+} catch {
+    $LedgerUserScopeReadable = $false
+}
+if ($null -eq $LedgerValue) {
+    if ($DryRun) {
+        if ($LedgerUserScopeReadable) {
+            Write-DryRun "the user environment variable G2C_RUNALERTS_LEDGER is not set: the real run would stop (setx G2C_RUNALERTS_LEDGER ""C:\path\to\alerts.jsonl"")"
+        } else {
+            Write-DryRun "the G2C_RUNALERTS_LEDGER user-variable check needs the Windows user environment-variable scope, which this host does not provide: the real run checks it on Windows"
+        }
+    } else {
+        throw "Set the user environment variable G2C_RUNALERTS_LEDGER first: setx G2C_RUNALERTS_LEDGER ""C:\path\to\alerts.jsonl"""
+    }
+} elseif ($DryRun) {
+    Write-DryRun "the G2C_RUNALERTS_LEDGER user environment variable is set"
 }
 
 $NewDirectory = Split-Path -Parent $LogPath
 if (-not (Test-Path -LiteralPath $NewDirectory)) {
-    New-Item -ItemType Directory -Path $NewDirectory | Out-Null
+    if ($DryRun) {
+        Write-DryRun "the log directory would be created: $NewDirectory"
+    } else {
+        New-Item -ItemType Directory -Path $NewDirectory | Out-Null
+    }
+} elseif ($DryRun) {
+    Write-DryRun "the log directory exists: $NewDirectory"
+}
+
+if ($DryRun) {
+    # Everything below builds the task objects and registers and starts the
+    # task; the report above is the complete preview, so the dry run exits
+    # here without running any of it.
+    Write-DryRun "task name: $TaskName"
+    Write-DryRun ("action: " + $SenderPythonResolved + " " + '"' + $SenderScript +
+                  '" --log-file "' + $LogPath + '" --ticks 4 --tick-interval 15')
+    Write-DryRun "triggers: fire once starting now, then repeat every 1 minute for 3650 days, plus fire once at logon"
+    Write-DryRun "settings: Hidden, IgnoreNew (no overlapping instances), execution time limit 55 seconds, start and keep running on battery power"
+    Write-DryRun "the real run would now register the scheduled task $TaskName (dry run: nothing registered)"
+    Write-DryRun "the real run would now start the scheduled task $TaskName (dry run: nothing started)"
+    if ($DryRunPlaceholderProblem) {
+        Write-DryRun "one or more placeholders are still unfilled (see the report above): exit code 1"
+        exit 1
+    }
+    Write-DryRun "nothing was registered, started, removed, created or written"
+    exit 0
 }
 
 $trigger  = New-ScheduledTaskTrigger -Once -At (Get-Date) `
