@@ -1464,6 +1464,12 @@ class TrackedTreeOwnerStringTest(unittest.TestCase):
                 r"^(NEUTRAL_TASK_NAME|LEGACY_TASK_NAME|OWNER_LABEL_NEEDLE"
                 r"|OWNER_TASK_NEEDLE) = ",
             ),
+            "tests/test_install_task_windows_ps1.py": (
+                # Same shape as the sender test constants above: the dry-run
+                # uninstall test needs the legacy name to drive the
+                # both-names listing assertion.
+                r"^LEGACY_TASK_NAME = ",
+            ),
         }
 
     def test_owner_strings_bounded_to_history_and_removal_targets(self):

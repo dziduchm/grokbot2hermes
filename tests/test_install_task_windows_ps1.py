@@ -182,25 +182,61 @@ class InstallTaskWindowsDryRunTest(unittest.TestCase):
         self.assertEqual(self.marker_text(marker), "")
         self.assertFalse(os.path.exists(os.path.join(appdata, "G2C")))
 
-    def test_dry_run_log_directory_line_follows_the_host_separator(self):
-        # The report names the directory the real run would create. On
-        # Windows the log path is APPDATA/G2C/<file> so the G2C component is
-        # a missing directory; on Unix Split-Path does not treat the
-        # backslash inside the template's log leaf as a separator, so the
-        # named parent is the existing APPDATA itself. Either way the line
-        # is a DRY RUN report and nothing is created.
+    def test_dry_run_log_directory_report_is_host_independent(self):
+        # pwsh 7 treats the backslash inside the template's log leaf as a
+        # path separator on every host (a real pwsh 7.4.6 run on Linux
+        # disproved the "on Unix the leaf is one segment" assumption), so
+        # which parent the report names (the existing APPDATA itself or its
+        # missing G2C child) must not be predicted from os.name. The
+        # portable invariants: the reported directory is the normalized
+        # parent of the --log-file path in the action line, the exists
+        # versus would-be-created wording matches the directory's real
+        # pre-run existence, and the run creates nothing (so checking the
+        # post-run state is the pre-run check the wording stands for).
         python_exe = self.make_interpreter(with_pythonw=True)
         sender = self.make_sender()
         self.write_filled(python_exe, sender)
+        appdata = os.path.join(self.tmp, "appdata")
+        os.makedirs(appdata, exist_ok=True)
+        pre_listing = sorted(os.listdir(appdata))
         proc, marker, appdata = self.run_script()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        if os.name == "nt":
-            self.assertIn("DRY RUN: the log directory would be created:",
-                          proc.stdout)
+        out = proc.stdout
+
+        create_prefix = "DRY RUN: the log directory would be created: "
+        exists_prefix = "DRY RUN: the log directory exists: "
+        dir_lines = [line for line in out.splitlines()
+                     if line.startswith(exists_prefix)
+                     or line.startswith(create_prefix)]
+        self.assertEqual(len(dir_lines), 1, out)
+        if dir_lines[0].startswith(create_prefix):
+            wording_exists = False
+            reported_dir = dir_lines[0][len(create_prefix):]
         else:
-            self.assertIn("DRY RUN: the log directory exists:",
-                          proc.stdout)
-        self.assertFalse(os.path.exists(os.path.join(appdata, "G2C")))
+            wording_exists = True
+            reported_dir = dir_lines[0][len(exists_prefix):]
+
+        action_lines = [line for line in out.splitlines()
+                        if line.startswith("DRY RUN: action: ")]
+        self.assertEqual(len(action_lines), 1, out)
+        log_marker = '--log-file "'
+        start = action_lines[0].index(log_marker) + len(log_marker)
+        end = action_lines[0].index('" --ticks 4 --tick-interval 15', start)
+        action_log_path = action_lines[0][start:end]
+
+        # The report names exactly the parent of the log file the action
+        # line would use, whatever separator the host renders it with.
+        self.assertEqual(os.path.normpath(reported_dir),
+                         os.path.normpath(os.path.dirname(action_log_path)))
+        # The wording matches the directory's real existence; the run
+        # created nothing (asserted below), so the post-run isdir here is
+        # the pre-run value the wording is judged against.
+        self.assertEqual(wording_exists, os.path.isdir(reported_dir))
+        # Nothing was created: APPDATA's listing is unchanged, the G2C
+        # directory is still not a directory after the run, and no stub
+        # fired.
+        self.assertEqual(pre_listing, sorted(os.listdir(appdata)))
+        self.assertFalse(os.path.isdir(os.path.join(appdata, "G2C")))
         self.assertEqual(self.marker_text(marker), "")
 
     def test_dry_run_warns_when_pythonw_is_missing(self):
