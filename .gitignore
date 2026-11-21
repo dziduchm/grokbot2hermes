@@ -7,6 +7,17 @@ __pycache__/
 receipts/
 run-*.json
 .g2h-*.tmp
+*.jsonl
+*.log
+secrets/
+*.pem
+*.key
+*.p12
+
+# Tool caches and virtualenvs
+.venv*/
+.pytest_cache/
+.ruff_cache/
 
 # OS noise
 .DS_Store

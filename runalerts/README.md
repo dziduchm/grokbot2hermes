@@ -54,7 +54,7 @@ Safety rails (built in, none are configurable):
 | File | Purpose |
 | --- | --- |
 | `runalerts/sender.py` | the stdlib sender: gate, per-key POST, self-test, multi-tick loop (`--self-test`, `--ledger`, `--webhook`, `--notify-closed`, `--ticks`, `--tick-interval`) |
-| `runalerts/com.md.g2c.runalerts-sender.plist` | macOS launchd timer template (paths only, no secrets) |
+| `runalerts/com.example.g2c.runalerts-sender.plist` | macOS launchd timer template (paths only, no secrets) |
 | `runalerts/install-task-windows.ps1` | Windows Task Scheduler installer template (edit two placeholder paths, review, run) |
 | `tests/test_runalerts_sender.py` | sender test suite (unittest, loopback mock) |
 
@@ -80,13 +80,14 @@ Example block:
 
     webapp:
       run_alerts:
-        outbox: /Users/md/.bfc-pipeline/run/g2c/alerts.jsonl
+        outbox: /absolute/path/to/alerts.jsonl
         profiles: [coder, code-reviewer, imilk, researcher]
         interval: 30
-        public_url: https://md-mm.taild7b334.ts.net
+        public_url: https://<host>.<tailnet>.ts.net
 
-- `outbox` = absolute ledger path (required; `/Users/md/.bfc-pipeline/run/g2c`
-  must exist; the emitter tightens it to 0700).
+- `outbox` = absolute ledger path (required; a home-relative choice such as
+  `~/.bfc-pipeline/run/g2c` resolved under the home directory is the typical
+  shape; the emitter tightens it to 0700).
 - `profiles` = BARE served profile ids, a yaml list or one comma string, e.g.
   `[coder, code-reviewer, imilk, researcher]`. Bare ids only: values like
   `profiles/main` are directory paths, not server ids, and would silently match
@@ -117,12 +118,17 @@ set `key_header` in the webhook file to change the header name).
 
 ## Step 3: place the webhook file
 
-    mkdir -p /Users/md/.bfc-pipeline/secrets
-    chmod 700 /Users/md/.bfc-pipeline/secrets
-    # create the webhook file with ONLY two / three keys, then:
-    chmod 600 /Users/md/.bfc-pipeline/secrets/g2c-grokbot-webhook.json
+The sender's default webhook path is home-relative: on macOS and Linux it reads
+`~/.bfc-pipeline/secrets/g2c-grokbot-webhook.json` (resolved under the running
+user's home directory via `Path.home()`), on Windows
+`%APPDATA%\G2C\g2c-grokbot-webhook.json`. Pass `--webhook` to use another path.
 
-`/Users/md/.bfc-pipeline/secrets/g2c-grokbot-webhook.json` (0600, never in the
+    mkdir -p ~/.bfc-pipeline/secrets
+    chmod 700 ~/.bfc-pipeline/secrets
+    # create the webhook file with ONLY two / three keys, then:
+    chmod 600 ~/.bfc-pipeline/secrets/g2c-grokbot-webhook.json
+
+`~/.bfc-pipeline/secrets/g2c-grokbot-webhook.json` (0600, never in the
 repo, never in logs):
 
     {"url": "<https webhook url>", "sender_key": "<the routine's key>"}
@@ -135,9 +141,8 @@ malformed header name refuses with an explanatory line (the key value is
 never logged). The acceptance note for a normalized shape logs once per
 process, not on every tick of a multi-tick schedule.
 
-Windows: the sender's default webhook path is `%APPDATA%\G2C\g2c-grokbot-webhook.json`
-(or pass `--webhook`). Place it in a directory only the current user can enter
-and give the file an owner-only ACL:
+Windows: place it in a directory only the current user can enter and give the
+file an owner-only ACL:
 
     powershell -Command "icacls 'C:\Users\me\AppData\Roaming\G2C\g2c-grokbot-webhook.json' /inheritance:r /grant:r 'me:F'"
 
@@ -160,12 +165,16 @@ gateway and owns the ledger dir):
 
 ### macOS: launchd timer
 
-Fill every `__PLACEHOLDER__` in `runalerts/com.md.g2c.runalerts-sender.plist`
+Fill every `__PLACEHOLDER__` in `runalerts/com.example.g2c.runalerts-sender.plist`
 (python3 path, sender script path, ledger path - MUST equal the config
 `outbox` from step 1 - and log path), then:
 
-    cp runalerts/com.md.g2c.runalerts-sender.plist ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist
-    launchctl load ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist
+    cp runalerts/com.example.g2c.runalerts-sender.plist ~/Library/LaunchAgents/com.example.g2c.runalerts-sender.plist
+    launchctl load ~/Library/LaunchAgents/com.example.g2c.runalerts-sender.plist
+
+Existing installs: an agent already registered under the old
+`com.md.g2c.runalerts-sender.plist` name and label keeps running unchanged; the
+rename is template-only and needs no action on those machines.
 
 ### Linux: cron or a systemd timer
 
@@ -311,7 +320,9 @@ touches the profile files themselves.
 ## Rollback
 
 - Stop the sender on macOS: `launchctl unload
-  ~/Library/LaunchAgents/com.md.g2c.runalerts-sender.plist` and delete the
+  ~/Library/LaunchAgents/com.example.g2c.runalerts-sender.plist` (fresh
+  installs; an existing install keeps its old
+  `com.md.g2c.runalerts-sender.plist` name) and delete the
   plist from `~/Library/LaunchAgents`. On Windows:
   `powershell -ExecutionPolicy Bypass -File .\runalerts\install-task-windows.ps1 -Uninstall`,
   and when that is refused with Access Denied, `schtasks /Delete /TN ComMdG2c.RunalertsSender /F`

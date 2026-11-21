@@ -1139,7 +1139,43 @@ class SenderCase(unittest.TestCase):
                 os.path.join("G2C", "g2c-grokbot-webhook.json")))
         else:
             self.assertEqual(sender.default_webhook_path(),
-                             sender.DEFAULT_WEBHOOK_PATH)
+                             os.path.join(os.path.expanduser("~"),
+                                          sender.DEFAULT_WEBHOOK_RELATIVE))
+
+    def test_default_webhook_constant_is_relative_never_absolute(self):
+        # Audit sweep: no absolute owner path may ship in this repo, not even
+        # in the default path constant.
+        self.assertFalse(os.path.isabs(sender.DEFAULT_WEBHOOK_RELATIVE))
+        self.assertEqual(sender.DEFAULT_WEBHOOK_RELATIVE,
+                         os.path.join(".bfc-pipeline", "secrets",
+                                      "g2c-grokbot-webhook.json"))
+
+    def test_default_webhook_resolves_under_faked_home(self):
+        # The POSIX default resolves under Path.home() at call time, so a
+        # faked HOME moves the default with it (no import-time binding).
+        if os.name == "nt":
+            self.skipTest("POSIX only: Path.home() is HOME-driven there")
+        with mock.patch.dict(os.environ, {"HOME": self.workdir}):
+            resolved = sender.default_webhook_path()
+        self.assertEqual(resolved, os.path.join(
+            self.workdir, ".bfc-pipeline", "secrets",
+            "g2c-grokbot-webhook.json"))
+
+    def test_explicit_webhook_arg_wins_over_the_default(self):
+        # An explicit --webhook must always win, even with a bogus default.
+        self.write_ledger([approval_record()])
+        server = CaptureServer()
+        try:
+            with mock.patch.object(
+                    sender, "default_webhook_path",
+                    return_value=os.path.join(self.workdir, "bogus")):
+                code = sender.main(["--ledger", self.ledger,
+                                    "--webhook", self.webhook_file(server)])
+        finally:
+            server.stop()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(server.requests), 1)
+        self.assertEqual(server.requests[0]["path"], "/hook")
 
 
 class InstallerTaskDefinitionTest(unittest.TestCase):

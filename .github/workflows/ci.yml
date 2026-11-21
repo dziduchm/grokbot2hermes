@@ -10,6 +10,12 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: the workflow token gets contents read only; the single
+# widened scope (pull-requests write) is granted on the gitleaks job alone,
+# because gitleaks-action comments on PRs when a pull_request scan finds a leak.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -65,6 +71,14 @@ jobs:
 
   secrets:
     runs-on: ubuntu-latest
+    permissions:
+      # A job-level block replaces the inherited workflow set, so contents read
+      # is restated for the fetch-depth 0 checkout. pull-requests write exists
+      # only because gitleaks-action v2.3.9 (GITLEAKS_ENABLE_COMMENTS defaults
+      # true) POSTs a PR review comment via the Octokit pulls API when a
+      # pull_request scan finds a leak.
+      contents: read
+      pull-requests: write
     steps:
       - name: Check out full history
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
