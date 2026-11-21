@@ -11,9 +11,11 @@ import importlib.util
 import json
 import logging
 import os
+import posixpath
 import re
 import shutil
 import stat
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -29,6 +31,17 @@ sender = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sender)
 
 DUMMY_KEY = "dummy-sender-key-not-a-real-credential"
+
+# The Windows scheduled task names this suite pins: the neutral registered
+# name the install path uses, and the legacy name installs made with older
+# scripts registered (kept in the template only as a removal target).
+NEUTRAL_TASK_NAME = "G2C.RunalertsSender"
+LEGACY_TASK_NAME = "ComMdG2c.RunalertsSender"
+# Owner-encoding scan needles for the static sweeps below: the launchd label
+# shape the plist template once carried, and the task name shape lowercased
+# for case-insensitive line scans.
+OWNER_LABEL_NEEDLE = "com.md.g2c"
+OWNER_TASK_NEEDLE = "commdg2c"
 
 CLOSED_RECORD_TEMPLATE = {
     "v": 1, "key": "p1|run-1|t1|7", "profile": "p1", "kind": "approval",
@@ -1139,7 +1152,88 @@ class SenderCase(unittest.TestCase):
                 os.path.join("G2C", "g2c-grokbot-webhook.json")))
         else:
             self.assertEqual(sender.default_webhook_path(),
-                             sender.DEFAULT_WEBHOOK_PATH)
+                             os.path.join(os.path.expanduser("~"),
+                                          sender.DEFAULT_WEBHOOK_RELATIVE))
+
+    def test_default_webhook_constant_is_relative_never_absolute(self):
+        # Audit sweep: no absolute owner path may ship in this repo, not even
+        # in the default path constant. The constant ships as the POSIX form,
+        # so the expected value is a forward-slash literal: building it with
+        # os.path.join emits backslash separators on the Windows legs. Both
+        # isabs variants must agree the constant is never absolute.
+        self.assertFalse(os.path.isabs(sender.DEFAULT_WEBHOOK_RELATIVE))
+        self.assertFalse(posixpath.isabs(sender.DEFAULT_WEBHOOK_RELATIVE))
+        self.assertEqual(sender.DEFAULT_WEBHOOK_RELATIVE,
+                         ".bfc-pipeline/secrets/g2c-grokbot-webhook.json")
+
+    def test_default_webhook_resolves_under_faked_home(self):
+        # The POSIX default resolves under Path.home() at call time, so a
+        # faked HOME moves the default with it (no import-time binding).
+        if os.name == "nt":
+            self.skipTest("POSIX only: Path.home() is HOME-driven there")
+        with mock.patch.dict(os.environ, {"HOME": self.workdir}):
+            resolved = sender.default_webhook_path()
+        self.assertEqual(resolved, os.path.join(
+            self.workdir, ".bfc-pipeline", "secrets",
+            "g2c-grokbot-webhook.json"))
+
+    def test_explicit_webhook_arg_wins_over_the_default(self):
+        # An explicit --webhook must always win, even with a bogus default.
+        self.write_ledger([approval_record()])
+        server = CaptureServer()
+        try:
+            with mock.patch.object(
+                    sender, "default_webhook_path",
+                    return_value=os.path.join(self.workdir, "bogus")):
+                code = sender.main(["--ledger", self.ledger,
+                                    "--webhook", self.webhook_file(server)])
+        finally:
+            server.stop()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(server.requests), 1)
+        self.assertEqual(server.requests[0]["path"], "/hook")
+
+
+class LaunchdTemplateTest(unittest.TestCase):
+    """Static check of the checked-in launchd timer template: the plist Label
+    must equal the label the template filename carries, so a renamed file can
+    never again register the stale (owner-encoding) name while every copy,
+    load and unload command in the docs points at the new one, and the
+    template must carry no owner-encoding name string at all. Pure file read:
+    nothing is loaded, nothing is installed."""
+
+    EXPECTED_LABEL = "com.example.g2c.runalerts-sender"
+
+    @classmethod
+    def template_text(cls):
+        path = os.path.join(REPO_ROOT, "runalerts",
+                            "com.example.g2c.runalerts-sender.plist")
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_label_matches_the_template_filename(self):
+        lines = self.template_text().splitlines()
+        labels = []
+        for index, line in enumerate(lines):
+            if "<key>Label</key>" not in line:
+                continue
+            window = " ".join(lines[index:index + 3])
+            match = re.search(r"<string>([^<]+)</string>", window)
+            assert match is not None, "unparsable Label block: %r" % line
+            labels.append(match.group(1))
+        self.assertEqual(len(labels), 1,
+                         "the plist template must set exactly one Label")
+        self.assertEqual(labels[0], self.EXPECTED_LABEL,
+                         "the plist Label must equal the label the template "
+                         "filename carries; a renamed file that still "
+                         "registers the old name breaks every rename claim "
+                         "the docs make")
+
+    def test_template_carries_no_owner_encoded_string(self):
+        lowered = self.template_text().lower()
+        self.assertNotIn(OWNER_LABEL_NEEDLE, lowered,
+                         "the launchd template must not carry the "
+                         "owner-encoding label or name")
 
 
 class InstallerTaskDefinitionTest(unittest.TestCase):
@@ -1253,13 +1347,111 @@ class InstallerTaskDefinitionTest(unittest.TestCase):
         forced = [line for line in fallback_lines if "/F" in line]
         self.assertTrue(forced, "the schtasks /Delete fallback must use /F")
         self.assertTrue(
-            any("ComMdG2c.RunalertsSender" in line or "$TaskName" in line
+            any(re.search(r"\$(task|TaskName)\b", line, re.IGNORECASE)
                 for line in forced),
-            "the schtasks fallback must name the ComMdG2c.RunalertsSender task")
+            "the schtasks fallback must delete by the per-name task variable")
         self.assertIn("catch", text,
                       "the uninstall must catch the Unregister-ScheduledTask failure first")
         self.assertIn("Access Denied", text,
                       "the fallback must document the Access Denied case it covers")
+
+    def test_uninstall_also_removes_the_legacy_task_name(self):
+        text = self.installer_text()
+        # Installs registered by older scripts must keep uninstalling cleanly:
+        # the neutral name is the only one the install path registers, and
+        # -Uninstall walks the legacy name too, each with the same
+        # Unregister-ScheduledTask then schtasks /Delete /F fallback per name.
+        self.assertIn('$TaskName = "%s"' % NEUTRAL_TASK_NAME, text)
+        self.assertIn('$LegacyTaskName = "%s"' % LEGACY_TASK_NAME, text)
+        legacy_lines = [line for line in text.splitlines()
+                        if LEGACY_TASK_NAME in line]
+        self.assertTrue(legacy_lines,
+                        "the legacy task name must be referenced for removal")
+        for line in legacy_lines:
+            lowered = line.lower()
+            self.assertTrue(
+                any(word in lowered for word in ("legacy", "older", "uninstall")),
+                "the legacy task name may be named only in removal context: %r"
+                % line)
+            self.assertNotIn("Register-ScheduledTask", line,
+                             "the legacy task name must never be named in a "
+                             "register call: %r" % line)
+        self.assertIsNotNone(
+            re.search(r"@\(\$TaskName,\s*\$LegacyTaskName\)", text),
+            "the uninstall must walk the registered name and the legacy name")
+
+
+class TrackedTreeOwnerStringTest(unittest.TestCase):
+    """Static scan of every tracked file for the owner-encoding name strings
+    the cleanup round scrubbed (needles: OWNER_LABEL_NEEDLE, OWNER_TASK_NEEDLE).
+    Remaining hits must sit where they are history or a legacy-removal or
+    compatibility target: any line of the CHANGELOG (it records what shipped
+    and what the unreleased state changes), and in every other tracked file
+    only the exact line shapes in allowed_line_shapes() - the constants whose
+    value names the legacy artifact as a removal target, and the doc lines
+    telling an existing install how to keep working or uninstall it. A new
+    occurrence anywhere else fails here. Pure file reads over git ls-files;
+    nothing runs."""
+
+    CHANGELOG_PATH = "CHANGELOG.md"
+
+    def tracked_paths(self):
+        out = subprocess.run(["git", "ls-files", "-z"], cwd=REPO_ROOT,
+                             check=True, capture_output=True).stdout
+        return [name for name in out.decode("utf-8").split("\0") if name]
+
+    def allowed_line_shapes(self):
+        legacy_rx = LEGACY_TASK_NAME.replace(".", r"\.")
+        plist_note_rx = OWNER_LABEL_NEEDLE.replace(".", r"\.")
+        return {
+            "runalerts/install-task-windows.ps1": (
+                r'\$LegacyTaskName = "' + legacy_rx + r'"',
+                r'^#.*legacy name "' + legacy_rx,
+                r"^#.*the legacy name /TN " + legacy_rx,
+            ),
+            "runalerts/README.md": (
+                r"`" + plist_note_rx + r"\.runalerts-sender\.plist`",
+                r"/TN " + legacy_rx,
+                r"task name `" + legacy_rx + r"`",
+            ),
+            "tests/test_runalerts_sender.py": (
+                r"^(NEUTRAL_TASK_NAME|LEGACY_TASK_NAME|OWNER_LABEL_NEEDLE"
+                r"|OWNER_TASK_NEEDLE) = ",
+            ),
+        }
+
+    def test_owner_strings_bounded_to_history_and_removal_targets(self):
+        # Binary scan like the dash scan: tracked files are read as bytes so a
+        # non-UTF-8 file (icon, image) cannot crash the sweep; line display
+        # decodes latin-1, which never raises and leaves ASCII intact.
+        label_needle = OWNER_LABEL_NEEDLE.encode("ascii")
+        task_needle = OWNER_TASK_NEEDLE.encode("ascii")
+        offenders = []
+        checked = 0
+        for rel in self.tracked_paths():
+            if rel == self.CHANGELOG_PATH:
+                continue  # the CHANGELOG records the old names on purpose
+            with open(os.path.join(REPO_ROOT, rel), "rb") as handle:
+                data = handle.read()
+            for lineno, line in enumerate(data.split(b"\n"), start=1):
+                lowered = line.lower()
+                if not any(needle in lowered
+                           for needle in (label_needle, task_needle)):
+                    continue
+                checked += 1
+                shapes = self.allowed_line_shapes().get(rel, ())
+                line_str = line.decode("latin-1")
+                if not any(re.search(shape, line_str) for shape in shapes):
+                    offenders.append("%s:%d: %s"
+                                     % (rel, lineno, line_str.strip()))
+        self.assertEqual(
+            offenders, [],
+            "owner-encoded name strings must stay bounded to CHANGELOG "
+            "history and the allowed legacy-removal or compatibility line "
+            "shapes (extend allowed_line_shapes only deliberately)")
+        self.assertGreater(
+            checked, 0,
+            "the scan must actually see the legacy pins it bounds")
 
 
 if __name__ == "__main__":

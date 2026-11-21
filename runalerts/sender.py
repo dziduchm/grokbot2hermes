@@ -139,7 +139,10 @@ DEFAULT_TICKS = 1
 DEFAULT_TICK_INTERVAL_S = 15.0
 TICK_WINDOW_S = 60  # the whole multi-tick run must finish inside one minute
 
-DEFAULT_WEBHOOK_PATH = "/Users/md/.bfc-pipeline/secrets/g2c-grokbot-webhook.json"
+# The webhook credential file on POSIX: home-relative (joined under Path.home()
+# by default_webhook_path(), resolved lazily so tests can fake HOME), never an
+# absolute owner path in the repo. Windows keeps its %APPDATA%/G2C location.
+DEFAULT_WEBHOOK_RELATIVE = ".bfc-pipeline/secrets/g2c-grokbot-webhook.json"
 DEFAULT_KEY_HEADER = "X-Sender-Key"
 USER_AGENT = "g2c-runalerts-sender/1"
 NOTIFY_CLOSED_ENV_NAMES = ("G2C_RUNALERTS_NOTIFY_CLOSED",
@@ -1057,13 +1060,14 @@ def _notify_closed_from_env(argv_value: bool) -> bool:
 
 
 def default_webhook_path() -> str:
-    """Platform default for --webhook: the installed macOS path on POSIX, and on Windows
-    the file under %APPDATA%/G2C (g2c-grokbot-webhook.json). Linux hands --webhook
-    explicitly."""
+    """Platform default for --webhook: on POSIX the file at
+    Path.home() / DEFAULT_WEBHOOK_RELATIVE (home-relative, resolved at call
+    time), and on Windows the file under %APPDATA%/G2C
+    (g2c-grokbot-webhook.json). Linux hands --webhook explicitly."""
     if os.name == "nt":
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
         return os.path.join(base, "G2C", "g2c-grokbot-webhook.json")
-    return DEFAULT_WEBHOOK_PATH
+    return str(Path.home() / DEFAULT_WEBHOOK_RELATIVE)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

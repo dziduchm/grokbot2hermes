@@ -3,6 +3,48 @@
 Format: Keep a Changelog, adapted (this project does not make versioned
 releases to package indexes; versions track the documented contracts).
 
+## Unreleased (public repo cleanup: no owner-specific paths or hosts in the repo)
+
+Changed:
+
+- Documentation placeholders: the runalerts README and the launchd plist
+  template carry no personal tailscale host or absolute owner path any more:
+  the tailscale example value became the generic `https://<host>.<tailnet>.ts.net`
+  placeholder, and every `/Users/<name>/...` example became `~/...` or a
+  generic placeholder.
+- The sender's POSIX default webhook path is home-relative:
+  `default_webhook_path()` resolves
+  `~/.bfc-pipeline/secrets/g2c-grokbot-webhook.json` under `Path.home()` at
+  call time (it used to be a hardcoded absolute path). The Windows
+  `%APPDATA%/G2C` default is unchanged, both are documented side by side in
+  the runalerts README, and new tests pin the relative constant, resolution
+  under a faked HOME, and that an explicit `--webhook` still wins.
+- launchd template renamed: `runalerts/com.md.g2c.runalerts-sender.plist` is
+  now `runalerts/com.example.g2c.runalerts-sender.plist` with the label
+  `com.example.g2c.runalerts-sender`; every reference updated. Fresh installs
+  use the new name; existing installs registered under the old
+  `com.md.g2c.runalerts-sender` label keep working with no change.
+- Windows Task Scheduler template: the installer registers the per-user task
+  under the neutral name `G2C.RunalertsSender` (it was
+  `ComMdG2c.RunalertsSender`). Existing Windows installs stay registered
+  under the old name and need no change: `-Uninstall` removes both names
+  (the same Unregister-ScheduledTask-then-`schtasks /Delete /F` fallback
+  applied per name), re-running the installer registers the new name, and
+  the runalerts README documents the manual fallback for both.
+- Static guard tests: the launchd template's Label must equal the label its
+  filename carries (it now really does) and the template must contain no
+  `com.md.g2c` string; a tracked-tree scan bounds every remaining
+  `com.md.g2c` / `ComMdG2c` occurrence to CHANGELOG history or a
+  legacy-removal/compatibility line, and the installer's uninstall must walk
+  both the registered and the legacy task name.
+- .gitignore: local run artifacts and caches (`*.jsonl`, `*.log`, `.venv*/`,
+  `.pytest_cache/`, `.ruff_cache/`) and key material (`secrets/`, `*.pem`,
+  `*.key`, `*.p12`) are ignored; no tracked file matches any new pattern.
+- CI least privilege: top-level `permissions: contents: read`; only the
+  gitleaks job widens to `pull-requests: write` because gitleaks-action v2.3.9
+  posts a PR review comment (Octokit pulls API, GITLEAKS_ENABLE_COMMENTS
+  defaults true) when a pull_request scan finds a leak.
+
 ## 0.2.0 (run-approvals chat alert sender, three-OS, hardening)
 
 Added:
