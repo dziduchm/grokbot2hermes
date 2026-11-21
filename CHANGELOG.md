@@ -30,7 +30,26 @@ Changed:
   under the old name and need no change: `-Uninstall` removes both names
   (the same Unregister-ScheduledTask-then-`schtasks /Delete /F` fallback
   applied per name), re-running the installer registers the new name, and
-  the runalerts README documents the manual fallback for both.
+  the runalerts README documents the manual fallback for both. To migrate
+  an install from the old name, run `-Uninstall` first (it removes both
+  names, including a freshly registered new one), then re-run the
+  installer, then check that exactly one task `G2C.RunalertsSender`
+  exists; re-running the installer without the uninstall would register
+  the new name while the legacy task keeps running alongside.
+- `install-task-windows.ps1` gained a `-DryRun` switch that reports every
+  action the installer would take, each line prefixed `DRY RUN:`, and
+  changes nothing (no task register, remove or start, no schtasks call, no
+  directory creation, no file write): unfilled placeholders are reported
+  and exit non-zero, and path existence, the pythonw.exe choice or the
+  python.exe fallback warning, the `G2C_RUNALERTS_LEDGER` check, the log
+  directory, the task name, the exact action, triggers, settings and the
+  would-be register and start are all reported; `-Uninstall -DryRun`
+  reports which of the two task names are present and would be removed,
+  read-only, listing both names as would-be checked when the
+  ScheduledTasks cmdlets are unavailable. Filling the placeholders and
+  pinning the sender copy stay manual steps the dry run validates. Tests
+  drive the real script in a temp filled copy under a stub harness (skip
+  without pwsh; the script stays PowerShell 5.1 compatible).
 - Static guard tests: the launchd template's Label must equal the label its
   filename carries (it now really does) and the template must contain no
   `com.md.g2c` string; a tracked-tree scan bounds every remaining

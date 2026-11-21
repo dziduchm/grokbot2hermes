@@ -1380,6 +1380,52 @@ class InstallerTaskDefinitionTest(unittest.TestCase):
             re.search(r"@\(\$TaskName,\s*\$LegacyTaskName\)", text),
             "the uninstall must walk the registered name and the legacy name")
 
+    def test_dry_run_switch_reports_only_through_the_prefixed_helper(self):
+        text = self.installer_text()
+        self.assertIn("[switch]$DryRun", text)
+        self.assertIsNotNone(
+            re.search(r"function Write-DryRun\b", text),
+            "the dry run report must flow through a single Write-DryRun helper")
+        self.assertIn('"DRY RUN: $Message"', text)
+        for line in text.splitlines():
+            if "DRY RUN:" in line:
+                self.assertTrue(
+                    '"DRY RUN: $Message"' in line
+                    or line.lstrip().startswith("#"),
+                    "only the Write-DryRun helper may emit the DRY RUN:"
+                    " prefix: %r" % line)
+
+    def test_dry_run_report_exits_before_any_task_object_is_built(self):
+        text = self.installer_text()
+        report_at = text.find('Write-DryRun "task name: $TaskName"')
+        self.assertGreater(
+            report_at, 0,
+            "the dry run must report the exact task name before exiting")
+        build_at = text.find("$trigger  = New-ScheduledTaskTrigger")
+        self.assertNotEqual(
+            build_at, -1,
+            "the task object build anchor must stay present")
+        self.assertGreater(
+            build_at, report_at,
+            "the dry run report must exit before New-ScheduledTask*"
+            "/Register-ScheduledTask/Start-ScheduledTask run")
+
+    def test_dry_run_uninstall_branch_never_mutates(self):
+        text = self.installer_text()
+        branch_at = text.find("if ($DryRun) {")
+        self.assertGreater(
+            branch_at, 0, "the uninstall dry-run branch is missing")
+        stop_at = text.find("foreach ($task in @($TaskName, $LegacyTaskName)) {",
+                            branch_at)
+        self.assertGreater(
+            stop_at, branch_at,
+            "the uninstall dry-run report must end before the real loop")
+        segment = text[branch_at:stop_at]
+        self.assertNotIn("Unregister-ScheduledTask -TaskName", segment,
+                         "the uninstall dry run must not call the real removal")
+        self.assertNotIn("schtasks.exe", segment,
+                         "the uninstall dry run must not call schtasks")
+
 
 class TrackedTreeOwnerStringTest(unittest.TestCase):
     """Static scan of every tracked file for the owner-encoding name strings
