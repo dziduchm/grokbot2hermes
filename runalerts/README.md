@@ -226,8 +226,8 @@ installer keeps the silent shape: it registers no visible-window task.
 The trigger pair is a one-minute repetition plus a per-user logon trigger
 scoped to the current user: `-AtLogOn -User <DOMAIN\user>`, computed once
 from `USERDOMAIN` and `USERNAME` (when `USERDOMAIN` is empty the bare user
-name is used, and when both are unavailable the dry run says so while the
-real run refuses). A bare `-AtLogOn` trigger means any user logon, and
+name is used, and when `USERNAME` is unavailable, whatever `USERDOMAIN`
+holds, the dry run says so while the real run refuses). A bare `-AtLogOn` trigger means any user logon, and
 Task Scheduler refuses to register that from a regular session with
 "Access is denied"; the per-user form is what makes the install work
 without elevation.
