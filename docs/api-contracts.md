@@ -259,9 +259,13 @@ Delivery happens after a pass persists events. Webhook: POST of the event
 JSON to the configured URL, `Content-Type: application/json`, an
 `Authorization: Bearer` header carrying the token from
 `G2H_NOTIFY_TOKEN` (required
-for any webhook destination). The destination must return 2xx; anything
-else, a transport error or a 10 second timeout records one failed attempt
-(`notify_failed`) with the error text (token value never included).
+for any webhook destination). The URL must be https, or plain http to a
+loopback host only (`127.0.0.1`, `localhost`, `::1`, a trial): plain
+http to any remote host is refused with a usage error before any
+delivery, and the URL value is never echoed. The destination must return
+2xx; anything else, a transport error or a 10 second timeout records one
+failed attempt (`notify_failed`) with the error text (token value never
+included).
 Command: the event JSON on stdin; exit 0 delivered, any other exit
 failed; 10 second timeout. Exactly one destination: if a URL and a
 command both resolve, g2h exits with a usage error; a CLI flag beats a

@@ -214,7 +214,9 @@ recorded in the ledger and never retried automatically. The webhook
 receives the full event JSON with an `Authorization: Bearer` header
 carrying the token from `G2H_NOTIFY_TOKEN` (required for the webhook;
 name only in
-output; the value never appears in argv, logs or receipts); the command
+output; the value never appears in argv, logs or receipts; the webhook
+URL must be https outside loopback, plain http only to `127.0.0.1`,
+`localhost` or `::1` as a trial, and the URL is never echoed); the command
 destination gets the same JSON on stdin and exit 0 means delivered. No
 destination exists by default: this repository ships no URL, no token
 and no integration endpoint, and wiring one (for example to any agent

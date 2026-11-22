@@ -40,10 +40,16 @@ Safety rails (built in, none are configurable):
   `alerts.bad.jsonl` next to the ledger.
 - Log lines are capped at 500 chars and never contain the webhook url or key.
 - Loopback http (`127.0.0.1`, `localhost`, `[::1]`) is allowed for trials only;
-  every other url must be https. The webhook file is refused outright when
+  every other url must be https. The url is parsed and the trial test compares
+  the parsed hostname (a query or path that merely contains a loopback address
+  is not a trial), and any url that carries userinfo is refused. The webhook
+  file is refused outright when
   others can read it (0600 mode on POSIX, owner-only ACL on Windows: any
   group-read bit refuses too, and an inconclusive check refuses fail closed
   instead of continuing with one warning).
+- The POST installs an empty proxy set: proxy environment variables such as
+  `http_proxy` are ignored, so a local proxy can never receive the sender key
+  (the loopback behavior follows the documented bus adapter).
 - Closed records (a waiter settled or vanished) stay ledger-only by default.
   Enable the one-line, link-free chat follow-up with the `--notify-closed` flag
   or `G2C_RUNALERTS_NOTIFY_CLOSED=1` (sender side only; the gateway has no

@@ -429,11 +429,15 @@ cmd_apply() {
     # Pass 1: read every prior BEFORE touching anything; build the state file
     # content in a temp file; refuse the whole batch on any legacy key (unless
     # --also-legacy) or on any undecidable raw value.
-    tmpdir="${TMPDIR:-/tmp}"
-    tmp_state="${tmpdir}/.set-wait-timeout-state.$$"
-    tmp_check="$tmp_state.ok"
+    # I4: mktemp names the temp state file unpredictably and creates it
+    # O_EXCL (no symlink follow): a shared /tmp must not let another local
+    # user pre-plant ".set-wait-timeout-state.$$" and have the '>' redirect
+    # clobber a target file through the planted symlink. Fail closed when
+    # mktemp fails (the old pid-only name also dies with this call).
+    tmp_state=$(mktemp "${TMPDIR:-/tmp}/.set-wait-timeout.XXXXXX") \
+        || die 1 "cannot create a temp state file"
     cleanup() {
-        rm -f "$tmp_state" "$tmp_check"
+        rm -f "$tmp_state"
     }
     trap cleanup EXIT
     # N4: the pre-copy temp holds the same content as the state file; write it

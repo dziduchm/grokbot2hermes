@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import urllib.request
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, List, Optional
@@ -522,6 +523,101 @@ class SenderCase(unittest.TestCase):
                                  now=self.now())
         self.assertEqual(counts["posted"], 0)
         self.assertEqual(open(self.ledger, encoding="utf-8").read(), before)
+
+    # -- Low 2: the loopback trial is parsed, not substring matched --------
+
+    def test_webhook_loopback_http_by_hostname(self):
+        for url in ("http://127.0.0.1:8642/hook", "http://localhost/hook",
+                    "http://[::1]:8642/hook"):
+            with self.subTest(url=url):
+                data = sender.load_webhook(self.webhook_file(url=url))
+                self.assertEqual(data["url"], url)
+
+    def test_webhook_substring_trap_refused(self):
+        for url in ("http://evil.example/x?x=//127.0.0.1",
+                    "http://127.0.0.1.evil.example/hook",
+                    "http://evil.example//localhost"):
+            with self.subTest(url=url):
+                with self.assertRaises(sender.AllowlistRefusal):
+                    sender.load_webhook(self.webhook_file(url=url))
+
+    def test_webhook_userinfo_refused(self):
+        for url in ("http://ops@127.0.0.1/hook",
+                    "https://ops:canary@example.com/hook",
+                    "http://127.0.0.1@evil.example/hook"):
+            with self.subTest(url=url):
+                with self.assertRaises(sender.AllowlistRefusal):
+                    sender.load_webhook(self.webhook_file(url=url))
+
+    def test_webhook_https_requires_a_host(self):
+        for url in ("https:/example.com/hook", "http://"):
+            with self.subTest(url=url):
+                with self.assertRaises(sender.AllowlistRefusal):
+                    sender.load_webhook(self.webhook_file(url=url))
+
+    def test_webhook_https_any_host_still_allowed(self):
+        data = sender.load_webhook(self.webhook_file(url="https://example.com/hook"))
+        self.assertEqual(data["url"], "https://example.com/hook")
+
+    # -- Low 3: the opener must ignore the proxy environment ---------------
+
+    def test_no_redirect_opener_pins_an_empty_proxy_set(self):
+        names = ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+                 "no_proxy", "NO_PROXY", "all_proxy", "ALL_PROXY")
+        saved = {name: os.environ.get(name) for name in names}
+        os.environ["http_proxy"] = "http://10.1.2.3:8080"
+        os.environ["HTTP_PROXY"] = "http://10.1.2.3:8080"
+        for name in names:
+            if name not in ("http_proxy", "HTTP_PROXY"):
+                os.environ.pop(name, None)
+        try:
+            opener = sender._no_redirect_opener()
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        # The default ProxyHandler would install an env-derived proxy set
+        # (with http_proxy above: an http entry): then a proxy could take
+        # the POST and with it the sender key. With ProxyHandler({}) no
+        # env-derived ProxyHandler may exist in the opener's handler list.
+        env_proxy_handlers = [
+            h for h in opener.handlers
+            if isinstance(h, urllib.request.ProxyHandler)
+            and getattr(h, "proxies", None)]
+        self.assertEqual(env_proxy_handlers, [])
+        no_redirect = [h for h in opener.handlers
+                       if h.__class__.__name__ == "_NoRedirect"]
+        self.assertEqual(len(no_redirect), 1)
+
+    def test_loopback_trial_post_ignores_a_dead_proxy_env(self):
+        names = ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+                 "no_proxy", "NO_PROXY", "all_proxy", "ALL_PROXY")
+        saved = {name: os.environ.get(name) for name in names}
+        os.environ["http_proxy"] = "http://127.0.0.1:9/"
+        os.environ["HTTP_PROXY"] = "http://127.0.0.1:9/"
+        for name in names:
+            if name not in ("http_proxy", "HTTP_PROXY"):
+                os.environ.pop(name, None)
+        self.write_ledger([approval_record()])
+        server = CaptureServer()
+        try:
+            counts = sender.run_once(self.ledger, self.webhook_file(server),
+                                     now=self.now())
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            server.stop()
+        # The POST reached the loopback sink directly (one request), and a
+        # dead http_proxy env var never diverted or consumed the attempt.
+        self.assertEqual(len(server.requests), 1)
+        self.assertEqual(counts["posted"], 1)
+        self.assertEqual(counts["sent"], 1)
+        self.assertEqual(counts["given_up"], 0)
 
     def test_self_test_posts_fixed_message(self):
         server = CaptureServer()
