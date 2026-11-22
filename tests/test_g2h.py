@@ -27,7 +27,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, NoReturn, Optional
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(TESTS_DIR)
@@ -45,6 +45,9 @@ if os.name != "posix":
     raise unittest.SkipTest(
         "g2h client suite is POSIX-only (chmod modes, symlinks); "
         "tests.test_runalerts_sender is the cross-platform suite")
+
+sys.path.insert(0, REPO_ROOT)
+import g2h  # noqa: E402
 
 G2H_PY = os.path.join(REPO_ROOT, "g2h.py")
 
@@ -1214,6 +1217,29 @@ class DashboardRelayCase(_Harness, unittest.TestCase):
         self.assertIn("timed out", entry["last_error"])
         self.assert_no_control_posts("webhook-timeout relay pass")
 
+    def test_36b_relay_refuses_remote_http_notifier_before_any_request(self):
+        # Low 1: plaintext http to a remote host is a usage error raised
+        # before any request, and neither the URL nor the token is echoed.
+        self.start_mock(default_seq=["waiting_for_approval"])
+        proc = self.dispatch_scenario("HTTP0", "url notifier over remote http")
+        self.assertEqual(proc.returncode, 16)
+        self.clear_recorder()
+        with self.mock.config.lock:
+            before = self.mock.config.total_requests
+        snap = self.relay("--notify-url", "http://notif.example.com/hook",
+                          env_extra={"G2H_NOTIFY_TOKEN":
+                                     "canary_notify_policy_token"})
+        self.assertEqual(snap.returncode, 2, snap.stdout)
+        payload = self.json_out(snap)
+        self.assertEqual(payload["exit_code"], 2)
+        self.assertIn("plaintext http", payload["error"])
+        for blob in (snap.stdout, snap.stderr):
+            self.assertNotIn("notif.example.com", blob)
+            self.assertNotIn("canary_notify_policy_token", blob)
+        with self.mock.config.lock:
+            self.assertEqual(self.mock.config.total_requests, before)
+        self.assert_no_control_posts("refused remote http notifier URL")
+
     # -----------------------------------------------------------------
     # Fixture: gateway down -> stale plus exactly one unreachable event.
     # -----------------------------------------------------------------
@@ -2081,6 +2107,101 @@ class GrokBusAdapterCase(unittest.TestCase):
         full = self.fingerprint_from_card(card)
         self.assertEqual(len(full), 64)
         self.assertEqual(self.envelope(self.sends[-1][2])["id"], full[:16])
+
+
+class _NotifierStubArgs:
+    def __init__(self, notify_url=None, notify_cmd=None):
+        self.notify_url = notify_url
+        self.notify_cmd = notify_cmd
+
+
+class _NotifierStubCtx(g2h.Ctx):
+    """Only what the resolve path needs: die() records and raises."""
+
+    def __init__(self):
+        super().__init__(json_mode=False, command="relay")
+        self.died = False
+        self.die_code = None
+        self.message = ""
+
+    def die(self, code, message, payload=None) -> NoReturn:
+        self.died = True
+        self.die_code = code
+        self.message = g2h.scrub(str(message))
+        raise g2h.G2hExit(code, message)
+
+
+class NotifierDestinationPolicyTest(unittest.TestCase):
+    """Focused helper tests for resolve_notifier_destination (Low 1).
+
+    The subprocess fixture classes above cover the relay loopback flow;
+    these cover the URL transport matrix directly: https is accepted for
+    any host, plain http only to loopback (by parsed hostname), and a
+    refusal never echoes the URL or the token.
+    """
+
+    CANARY_TOKEN = "canary_notify_policy_token"
+
+    def setUp(self):
+        self.saved_token = os.environ.get("G2H_NOTIFY_TOKEN")
+        os.environ["G2H_NOTIFY_TOKEN"] = self.CANARY_TOKEN
+        os.environ.pop("G2H_NOTIFY_CMD", None)
+        self.addCleanup(self._restore_token)
+
+    def _restore_token(self):
+        if self.saved_token is None:
+            os.environ.pop("G2H_NOTIFY_TOKEN", None)
+        else:
+            os.environ["G2H_NOTIFY_TOKEN"] = self.saved_token
+
+    def resolve(self, url):
+        ctx = _NotifierStubCtx()
+        dest = g2h.resolve_notifier_destination(ctx, _NotifierStubArgs(url))
+        return ctx, dest
+
+    def resolve_expect_exit(self, url):
+        ctx = _NotifierStubCtx()
+        with self.assertRaises(g2h.G2hExit):
+            g2h.resolve_notifier_destination(ctx, _NotifierStubArgs(url))
+        self.assertTrue(ctx.died)
+        return ctx
+
+    def test_https_any_host_is_accepted(self):
+        for url in ("https://notif.example.com/hook",
+                    "https://127.0.0.1/hook", "https://localhost/hook"):
+            with self.subTest(url=url):
+                ctx, dest = self.resolve(url)
+                self.assertFalse(ctx.died)
+                self.assertEqual(dest, ("url", url))
+
+    def test_plain_http_loopback_is_accepted(self):
+        for url in ("http://127.0.0.1:8642/hook", "http://localhost:8642/hook",
+                    "http://[::1]:8642/hook"):
+            with self.subTest(url=url):
+                ctx, dest = self.resolve(url)
+                self.assertFalse(ctx.died)
+                self.assertEqual(dest, ("url", url))
+
+    def test_plain_http_remote_is_refused_without_echo(self):
+        ctx = self.resolve_expect_exit("http://notif.example.com/hook")
+        self.assertEqual(ctx.die_code, g2h.EXIT_USAGE)
+        self.assertIn("plaintext http", ctx.message)
+        self.assertNotIn("notif.example.com", ctx.message)
+        self.assertNotIn(self.CANARY_TOKEN, ctx.message)
+
+    def test_uppercase_loopback_host_is_accepted(self):
+        ctx, dest = self.resolve("http://LOCALHOST:8642/hook")
+        self.assertFalse(ctx.died)
+        self.assertEqual(dest, ("url", "http://LOCALHOST:8642/hook"))
+
+    def test_other_scheme_or_hostless_url_is_refused(self):
+        for url in ("gopher://127.0.0.1/hook", "http:/notif.example.com/hook",
+                    "http:///hook"):
+            with self.subTest(url=url):
+                ctx = self.resolve_expect_exit(url)
+                self.assertEqual(ctx.die_code, g2h.EXIT_USAGE)
+                self.assertNotIn("notif.example.com", ctx.message)
+                self.assertNotIn(self.CANARY_TOKEN, ctx.message)
 
 
 def _free_loopback_port():

@@ -5,6 +5,35 @@ releases to package indexes; versions track the documented contracts).
 
 ## Unreleased (public repo cleanup: no owner-specific paths or hosts in the repo)
 
+Security (all five findings from the ac7807b code-security review, one branch):
+
+- `g2h` notifier: a webhook destination must be https, or plain http to a
+  loopback host (`127.0.0.1`, `localhost`, `::1` as a trial). Any other
+  plain http destination is refused with a usage error before any
+  delivery, and the URL or token is never echoed. The rule now stands in
+  docs/api-contracts.md and SECURITY.md: it used to be silently absent
+  for this one destination while the runalerts sender and the bus
+  adapter example already enforced https outside loopback.
+- `runalerts/sender.py`: the loopback trial classification is
+  hostname-based (`urllib.parse.urlsplit`) instead of a substring scan of
+  the whole URL, so a URL whose query or path merely contains
+  `//127.0.0.1` can no longer carry the sender key to a remote host over
+  plain http, and URLs that carry userinfo are refused (the same shape
+  the documented bus adapter contract already enforces).
+- `runalerts/sender.py`: the POST opener pins `ProxyHandler({})` so
+  `http_proxy` / `https_proxy` can no longer route the sender key through
+  a proxy; the bus adapter example already did this and the sender was
+  the one network path without the guard.
+- `runalerts/set-wait-timeout.sh`: the temp state file is created by
+  `mktemp` (unpredictable name, O_EXCL, no symlink follow) instead of a
+  pid-only name under a shared /tmp; an mktemp failure fails closed.
+  The unused `state.ok` sidecar (never written) is gone with the same
+  cleanup trap.
+- `.gitleaks.toml`: the empty `[allowlist]` block is dropped (it fails to
+  load on current gitleaks, which would break the secrets job on
+  upgrade); the default rules stay active with zero suppressions and any
+  future allowlist entry needs an owner review first.
+
 Added:
 
 - `runalerts/set-wait-timeout.ps1`: the Windows port of the wait timeout

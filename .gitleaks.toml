@@ -1,9 +1,6 @@
-# Gitleaks configuration: default rules active, allowlist intentionally
-# EMPTY. Any allowlist entry requires an owner review first.
+# Gitleaks configuration: the default rules stay active (useDefault below).
+# No [allowlist] block is defined on purpose: an allowlist suppresses
+# findings, so any future allowlist entry needs an owner review first.
 
 [extend]
 useDefault = true
-
-[allowlist]
-  description = "Intentionally empty allowlist: entries require owner review"
-  paths = []

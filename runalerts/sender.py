@@ -88,6 +88,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 
 # ---------------------------------------------------------------------------
 # platform: POSIX fcntl or Windows msvcrt for the cross-process ledger gate
@@ -116,6 +117,9 @@ MAX_ATTEMPTS = 3
 POST_TIMEOUT_S = 10.0
 MAX_PAYLOAD_BYTES = 3072
 RECORD_VERSION = 1
+# Loopback is the only plain-http destination (trial): urlsplit .hostname is
+# compared against this set, never a substring of the whole url.
+_LOOPBACK_URL_HOSTS = frozenset(("127.0.0.1", "localhost", "::1"))
 
 STATUS_PENDING = "pending"
 STATUS_SENT = "sent"
@@ -453,11 +457,22 @@ def load_webhook(path) -> Dict[str, str]:
         raise AllowlistRefusal("webhook file sender_key missing")
     if not isinstance(header, str) or not header:
         raise AllowlistRefusal("webhook file key_header missing")
-    lowered = url.lower()
-    loopback = ("//127.0.0.1" in lowered or "//localhost" in lowered
-                or "//[::1]" in lowered)
-    if not lowered.startswith("https://") and not loopback:
-        raise AllowlistRefusal("webhook url must be https (loopback http is trial-only)")
+    # Parse the URL host instead of scanning substrings: a url such as
+    # http://evil.example/x?x=//127.0.0.1 must not classify a remote host as
+    # a loopback trial. Https is allowed to any host, plain http only to the
+    # loopback hostnames (trial), and a url that carries userinfo is refused
+    # outright, matching the documented bus adapter contract.
+    parts = urlsplit(url)
+    hostname = parts.hostname or ""
+    userinfo = parts.username is not None or parts.password is not None
+    loopback = hostname in _LOOPBACK_URL_HOSTS
+    if parts.scheme != "https" or not hostname:
+        if parts.scheme != "http" or not loopback:
+            raise AllowlistRefusal(
+                "webhook url must be https "
+                "(plain http is a loopback trial: 127.0.0.1, localhost, ::1)")
+    if userinfo:
+        raise AllowlistRefusal("webhook url must not carry userinfo")
     readable = world_readable(path)
     if readable is True:
         raise AllowlistRefusal(
@@ -726,7 +741,10 @@ def _no_redirect_opener():
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None  # any redirect is a failed attempt: never re-send the key
 
-    return urllib.request.build_opener(_NoRedirect)
+    # ProxyHandler({}) pins an empty proxy set: the default handler would
+    # honor http_proxy/https_proxy and route the sender key through a proxy.
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _NoRedirect)
 
 
 def post_payload(webhook: Dict[str, str], payload: dict) -> int:

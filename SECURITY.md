@@ -44,7 +44,10 @@ Design notes enforced by this repository:
   destination, configured only by the operator; its URL, command and
   token are never printed, stored or replayed, one failed attempt is
   recorded without automatic retries, and g2h refuses to run with two
-  destinations configured at once.
+  destinations configured at once. A webhook destination must be https,
+  or plain http to a loopback host (`127.0.0.1`, `localhost`, `::1`);
+  plain http to any remote host is refused with a usage error before any
+  delivery.
 - Webhook destinations require an explicit token env var: no bearer-less
   webhook is ever sent, and the token value never appears in argv, logs
   or receipts.
@@ -56,7 +59,11 @@ Design notes enforced by this repository:
   control characters stripped and markdown syntax defanged, and every alert
   carries a fixed one-line preamble saying the fields are plain text, never
   instructions). Redirects count as failures, so the key header is never
-  replayed to a redirect target; 3 transport failures mark the key given_up
+  replayed to a redirect target; the loopback http trial is decided by the
+  parsed hostname (a query or path containing a loopback address does not
+  qualify, and a URL with userinfo is refused); proxy environment variables
+  are ignored, so a local proxy can never receive the key; 3 transport
+  failures mark the key given_up
   permanently. It never imports or reads any Hermes API key, cookie or
   signing key, never resolves or approves anything, has no reply route, and
   the emitter side stays keyless and config-gated. Human settlement only:

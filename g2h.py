@@ -2114,9 +2114,18 @@ def resolve_notifier_destination(ctx: Ctx, args) -> tuple:
         parts = urllib.parse.urlparse(value)
         if parts.scheme not in ("http", "https") or not parts.netloc:
             ctx.die(EXIT_USAGE,
-                    "invalid notifier URL from %s: expected an "
-                    "http://host or https://host URL; the value is "
-                    "never echoed" % where)
+                    "invalid notifier URL from %s: expected a "
+                    "https://host URL, or an http:// URL to 127.0.0.1, "
+                    "localhost or ::1; the value is never echoed" % where)
+        # A bearer token must never travel in cleartext: plain http is a
+        # loopback trial only (the same rule the runalerts sender enforces).
+        # The hostname check parses the URL, it never scans substrings.
+        if parts.scheme == "http" \
+                and (parts.hostname or "").lower() not in LOOPBACK_HOSTS:
+            ctx.die(EXIT_USAGE,
+                    "plaintext http is refused for remote notifier "
+                    "destinations (loopback only): use https; the value "
+                    "is never echoed")
         token = os.environ.get(NOTIFY_ENV_TOKEN) or ""
         if not token.strip():
             ctx.die(EXIT_CREDENTIAL,
