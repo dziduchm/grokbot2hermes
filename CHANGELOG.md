@@ -3,7 +3,17 @@
 Format: Keep a Changelog, adapted (this project does not make versioned
 releases to package indexes; versions track the documented contracts).
 
-## Unreleased (public repo cleanup: no owner-specific paths or hosts in the repo)
+## Unreleased
+
+## 0.1.0 - 2026-11-23
+
+First public GitHub release of this repository (tag v0.1.0). The shipped
+`g2h` client version string is `0.1.0`, and the pyproject metadata is
+aligned to `0.1.0` so the tag, the client and the metadata all agree.
+The project remains deliberately not pip-installable: the version names
+the release, not a package. The tag covers the current tree, including
+all of the work below, promoted out of Unreleased on the same day
+(public repo cleanup: no owner-specific paths or hosts in the repo).
 
 Security (all five findings from the ac7807b code-security review, one branch):
 
@@ -173,6 +183,12 @@ Changed:
 
 ## 0.2.0 (run-approvals chat alert sender, three-OS, hardening)
 
+Historical note: the 0.2.0 section and the original 0.1.0 contract
+section below predate this repository's git tagging and were never
+separate GitHub releases; 0.2.0 was only ever a version heading in this
+changelog and in pyproject metadata. The first public GitHub release is
+`0.1.0 - 2026-11-23` above (tag v0.1.0), which covers the current tree.
+
 Added:
 
 - `runalerts/`: a config-gated, stdlib-only sender for the Hermes gateway
@@ -289,7 +305,7 @@ checks (group or other readable bits refuse; an inconclusive platform check
 refuses too), 3-attempt give-up, suppression budget on the emitter side,
 500-char capped logs without url or key.
 
-## 0.1.0
+## 0.1.0 (initial client contract, pre-tag)
 
 - `g2h`: dispatch, status, wait, stop, cancel, resolve, dashboard, relay.
 - Crash-safe 0600 receipts in a 0700 dir, idempotent dispatch with replay

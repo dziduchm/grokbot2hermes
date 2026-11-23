@@ -4,7 +4,7 @@
 # checkout (`./g2h`, `python3 runalerts/sender.py`); there is no build step and
 # no published package. See CONTRIBUTING.md for the pinned dev tooling.
 name = "grokbot2hermes"
-version = "0.2.0"
+version = "0.1.0"
 description = "Dispatch tasks from Grok Bot to Hermes Agent; stdlib-only client plus an opt-in run-approvals chat alert sender"
 readme = "README.md"
 license = { file = "LICENSE" }
