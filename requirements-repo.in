@@ -1,0 +1,15 @@
+# Version pins for the tools CI installs. This file is the source of
+# truth; the hash-locked install file is requirements-repo.txt, which is
+# generated from this file with pip-compile --generate-hashes (see
+# CONTRIBUTING.md). A version bump here is a deliberate change: read the
+# release notes, regenerate the lock file, and expect pip-audit to hold
+# the job to this exact set.
+# The client, the dashboard and the runalerts sender stay standard-library
+# only: nothing in this file is a runtime dependency of what ships.
+#
+# ruff also drives the lint job in ci.yml and the pre-commit hook: bump
+# all three references in the same commit.
+bandit==1.8.6
+pip-audit==2.9.0
+ruff==0.15.8
+semgrep==1.186.0

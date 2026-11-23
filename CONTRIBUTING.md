@@ -23,8 +23,11 @@ source plus an SVG preview, editable at https://app.diagrams.net or in the
 draw.io desktop app; please re-export or update the SVG preview so it
 stays in sync with the `.drawio` source). `.github/workflows/ci.yml` is
 the pipeline, with the pinned security scanner workflows
-(`codeql.yml`, `sast.yml`, `scorecard.yml`) alongside it and their tool
-pins in `requirements-repo.txt`.
+(`codeql.yml`, `sast.yml`, `scorecard.yml`) alongside it. The tool pins
+live in `requirements-repo.in`; the workflows install their tools with
+`--require-hashes` from the hash-locked closures generated from it with
+`pip-compile --generate-hashes` (`requirements-repo.txt` for the sast
+job, `requirements-ruff.txt` for the lint job).
 
 ## Local setup
 
@@ -44,14 +47,15 @@ What you need:
   platform behavior by `os.name`. If you do not have the required
   Python locally, you can skip straight to reading the CI run on your
   pull request.
-- **Linting** uses ruff; the CI pins the exact version (0.15.8). There are
+- **Linting** uses ruff; the CI installs the exact pinned version (0.15.8)
+  from the hash-locked `requirements-ruff.txt`. There are
   no third-party runtime dependencies anywhere in the client or the
   `runalerts/` sender; ruff is the
   only dev-time tool you may want, so a throwaway virtualenv is enough:
 
 ```console
 $ python -m venv /tmp/g2h-lint-venv
-$ /tmp/g2h-lint-venv/bin/python -m pip install "ruff==0.15.8"
+$ /tmp/g2h-lint-venv/bin/python -m pip install --require-hashes -r requirements-ruff.txt
 $ /tmp/g2h-lint-venv/bin/ruff --version
 ```
 
@@ -60,10 +64,10 @@ $ /tmp/g2h-lint-venv/bin/ruff --version
 CI (`.github/workflows/ci.yml`) does a lint pass, a test pass, a dash
 scan, and a secrets scan over every pull request.
 
-Lint, with the exact pinned ruff version CI installs:
+Lint, from the same hash-locked ruff closure CI installs:
 
 ```console
-$ python -m pip install "ruff==0.15.8"
+$ python -m pip install --require-hashes -r requirements-ruff.txt
 $ ruff check g2h.py runalerts/ tests/
 ```
 
@@ -92,14 +96,23 @@ known advisory fails, minus eight documented release-coupled ignores for
 semgrep's own dependency pins - see the pip-audit step comment in
 .github/workflows/sast.yml); `scorecard.yml` publishes the OpenSSF
 Scorecard report on main and a weekly schedule (pull_request runs analyze
-the head without publishing). The tool pins live in requirements-repo.txt.
+the head without publishing). The tool pins live in requirements-repo.in;
+the sast and lint jobs install their tools with `--require-hashes` from
+the hash-locked requirements-repo.txt and requirements-ruff.txt closures
+pip-compile --generate-hashes generates from it. Regenerate the affected
+closure after editing a pin file, then re-run the pip-audit pass below:
+
+```console
+$ pip-compile --generate-hashes --output-file=requirements-repo.txt requirements-repo.in
+$ pip-compile --generate-hashes --output-file=requirements-ruff.txt requirements-ruff.in
+```
 
 Copy-paste the scanner passes locally (a throwaway venv, no repository
 state touched):
 
 ```console
 $ python3 -m venv /tmp/g2h-scanners-venv
-$ /tmp/g2h-scanners-venv/bin/python -m pip install -r requirements-repo.txt
+$ /tmp/g2h-scanners-venv/bin/python -m pip install --require-hashes -r requirements-repo.txt
 $ /tmp/g2h-scanners-venv/bin/bandit -q -r g2h.py g2h_ui.py runalerts .github/scripts
 $ /tmp/g2h-scanners-venv/bin/semgrep scan --config p/default --metrics=off
 $ /tmp/g2h-scanners-venv/bin/pip-audit --requirement requirements-repo.txt --strict
@@ -110,7 +123,9 @@ The bandit pass exits 1 as long as the accepted low findings are visible
 and pip-audit passes must exit 0. The CI pip-audit carries eight documented
 `--ignore-vuln` flags for advisories inside semgrep's own dependency pins,
 so the local pip-audit pass above should report exactly those eight (and
-nothing else) until the semgrep pin in requirements-repo.txt moves.
+nothing else) until the semgrep pin in requirements-repo.in moves (then
+regenerate requirements-repo.txt, re-audit, and drop any stale
+`--ignore-vuln` entry).
 
 ## Test mechanics: the mock gateway
 

@@ -2,6 +2,9 @@
 # scan for em/en dashes on every tracked file, and a full-history secret
 # scan. Every "uses:" step is pinned to a full 40-char commit SHA with the
 # resolved tag named in a comment (no floating @vN refs, no secrets here).
+# The lint pip install runs with --require-hashes against the hash-locked
+# closure in requirements-ruff.txt, generated from requirements-ruff.in
+# with pip-compile --generate-hashes.
 
 name: ci
 
@@ -26,8 +29,8 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
-      - name: Install pinned ruff (development-only linter)
-        run: python -m pip install "ruff==0.15.8"
+      - name: Install hash-locked ruff (development-only linter)
+        run: python -m pip install --require-hashes -r requirements-ruff.txt
       - name: Lint client, sender and tests (rules E, F, W)
         run: ruff check g2h.py runalerts/ tests/
 

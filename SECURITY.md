@@ -85,8 +85,8 @@ Design notes enforced by this repository:
   it is bounded, escaped and labeled inside the card, and never
   executed.
 
-Automated security scanning (GitHub Actions on every push and pull
-request):
+Automated security scanning (GitHub Actions on every pull request,
+every push to main, and a weekly Scorecard run):
 
 - CodeQL (`.github/workflows/codeql.yml`): Python plus the Actions
   workflows, security-extended suites, results per language in the code
@@ -95,7 +95,10 @@ request):
   (g2h.py, g2h_ui.py, runalerts/, .github/scripts/; tests are excluded
   because their findings are the review-documented test-only classes),
   semgrep with the community rules, and pip-audit over
-  requirements-repo.txt. A medium or high bandit severity finding, any
+  requirements-repo.txt, installed with
+  `pip install --require-hashes` from the hash-locked closure generated
+  from requirements-repo.in with `pip-compile --generate-hashes`. A
+  medium or high bandit severity finding, any
   semgrep community-rule finding or any known advisory in the audited set
   fails the job, except for eight documented, release-coupled ignores for
   advisories inside semgrep's own dependency pins (the mcp,

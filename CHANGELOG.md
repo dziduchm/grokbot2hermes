@@ -71,10 +71,16 @@ Added:
   and higher, semgrep with the community rules fails on any finding, and
   pip-audit fails on any known advisory) and `scorecard.yml` (OpenSSF
   Scorecard, published on pushes to main and a weekly schedule; PR runs
-  analyze the head without publishing). Tool pins live in
-  requirements-repo.txt (bandit 1.8.6, pip-audit 2.9.0, ruff 0.15.8 in
-  sync with the lint and pre-commit pins, semgrep 1.186.0, moved up from
-  the review's 1.136.0 for its safer dependency graph). The pip-audit
+  analyze the head without publishing). The sast and lint jobs install
+  their tools with `pip install --require-hashes` from hash-locked
+  closure files generated with `pip-compile --generate-hashes`:
+  requirements-repo.in (the source of truth: bandit 1.8.6, pip-audit
+  2.9.0, semgrep 1.186.0, moved up from the review's 1.136.0 for a
+  current scanner and for the dropped protobuf advisory in the audited
+  closure: the accepted advisory count moved from four to eight, all
+  inside semgrep's own dependency pins) and requirements-ruff.in (ruff
+  0.15.8, in sync with the pins above and .pre-commit-config.yaml) for
+  lint, which no longer installs the scanner tools. The pip-audit
   step carries eight documented --ignore-vuln entries for advisories
   inside semgrep's own dependency pins (mcp, opentelemetry-api,
   wcmatch; the step comment in sast.yml states the release-coupled

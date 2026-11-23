@@ -2,7 +2,10 @@
 # ci.yml: every "uses:" step is pinned to a full 40-char commit SHA with
 # the resolved tag named in a trailing comment, and permissions stay
 # read-only end to end (nothing here uploads SARIF, so no
-# security-events write is requested).
+# security-events write is requested). The pip install below runs with
+# --require-hashes against the hash-locked closure in
+# requirements-repo.txt, generated from requirements-repo.in with
+# pip-compile --generate-hashes.
 #
 # Scope: production code only (g2h.py, g2h_ui.py, runalerts/,
 # .github/scripts/). tests/ is excluded from the bandit scan on purpose:
@@ -44,8 +47,8 @@ jobs:
           # mid-range 3.11 that every entry of requirements-repo.txt
           # supports; the lint job keeps its own higher pin.
           python-version: "3.11"
-      - name: Install the pinned, audited scanner tools
-        run: python -m pip install -r requirements-repo.txt
+      - name: Install the hash-locked, audited scanner tools
+        run: python -m pip install --require-hashes -r requirements-repo.txt
       - name: Bandit scan (full report, no gate yet)
         # Bandit exits 1 whenever it reports any finding, which is expected
         # here because the accepted low findings above are in scope. Exit 2
@@ -60,6 +63,9 @@ jobs:
           if [ "$rc" -gt 1 ]; then
             exit "$rc"
           fi
+          # Print the full report so the accepted low findings stay
+          # visible in the CI log, not only inside the file.
+          cat "${{ runner.temp }}/bandit.txt"
       - name: Bandit gate (any medium or high severity finding fails)
         run: |
           bandit -r g2h.py g2h_ui.py runalerts .github/scripts \
@@ -70,10 +76,11 @@ jobs:
         run: |
           semgrep scan --config p/default --error --metrics=off
       - name: pip-audit (any known advisory in the audited set fails)
-        # The audited set is requirements-repo.txt plus its full resolved
-        # closure. Eight known advisories sit inside semgrep 1.186.0's own
-        # dependency pins with fixes outside those pins' bounds, so no
-        # current semgrep release resolves to fixed versions: five GHSA
+        # The audited set is the full hash-locked closure pip installs
+        # from requirements-repo.txt. Eight known advisories sit inside
+        # semgrep 1.186.0's own dependency pins with fixes outside those
+        # pins' bounds, so no current semgrep release resolves to fixed
+        # versions: five GHSA
         # advisories affect mcp, which semgrep pins exactly
         # (mcp==1.29.0, fixed in 1.30.0+), two affect opentelemetry-api
         # (semgrep caps it around 1.37, fixed in 1.45.1+), and one affects
@@ -82,9 +89,10 @@ jobs:
         # dependencies (nothing here ships, so nothing is installed on
         # user machines), and GitHub runners give no production access.
         # The ignores are release-coupled: when the semgrep pin in
-        # requirements-repo.txt next moves, drop stale --ignore-vuln
-        # entries first and re-audit; every other advisory in the closure
-        # still fails this job.
+        # requirements-repo.in next moves, regenerate
+        # requirements-repo.txt, drop stale --ignore-vuln entries first
+        # and re-audit; every other advisory in the closure still fails
+        # this job.
         run: |
           pip-audit --requirement requirements-repo.txt --strict \
             --ignore-vuln GHSA-84m7-p3x7-pcfv \
