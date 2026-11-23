@@ -3,6 +3,9 @@
 Dispatch tasks from Grok Bot to Hermes Agent. Not a migration tool.
 
 [![ci](https://github.com/dziduchm/grokbot2hermes/actions/workflows/ci.yml/badge.svg)](https://github.com/dziduchm/grokbot2hermes/actions/workflows/ci.yml)
+[![codeql](https://github.com/dziduchm/grokbot2hermes/actions/workflows/codeql.yml/badge.svg)](https://github.com/dziduchm/grokbot2hermes/actions/workflows/codeql.yml)
+[![sast](https://github.com/dziduchm/grokbot2hermes/actions/workflows/sast.yml/badge.svg)](https://github.com/dziduchm/grokbot2hermes/actions/workflows/sast.yml)
+[![scorecard](https://github.com/dziduchm/grokbot2hermes/actions/workflows/scorecard.yml/badge.svg)](https://github.com/dziduchm/grokbot2hermes/actions/workflows/scorecard.yml)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -305,7 +308,10 @@ appears in argv, output, logs or receipts (a redaction wrapper scrubs
 every output path). Authorization is never forwarded across redirects;
 plain http to non-loopback hosts is refused unless you pass
 `--allow-insecure-http` (which warns). Approval and clarify are manual
-operator subcommands only.
+operator subcommands only. Automated security scanners (CodeQL, bandit,
+semgrep, pip-audit, a full-history gitleaks scan and OpenSSF Scorecard)
+run in this repository's GitHub Actions on every change; see SECURITY.md,
+section "Automated security scanning".
 
 ## Version support and provenance
 

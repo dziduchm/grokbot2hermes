@@ -1,0 +1,86 @@
+# OpenSSF Scorecard supply-chain scoring for this public repository. Same
+# conventions as ci.yml: every "uses:" step is pinned to a full 40-char
+# commit SHA with the resolved tag named in a trailing comment, top-level
+# permissions stay read-only, and jobs restate the permissions they need
+# (a job-level permissions block replaces the workflow set).
+#
+# Shape and restrictions per the scorecard-action v2.6.0 documentation:
+# - the publish job runs on pushes to main and a weekly schedule with
+#   publish_results: true; id-token: write exists only so the action can
+#   mint the workload identity token the publish requires;
+# - pull_request runs analyze the PR head with publish_results: false and
+#   no id-token;
+# - only the publish job may hold id-token: write, its steps must stay
+#   inside the approved action list (checkout, scorecard-action,
+#   upload-sarif), and there must be no workflow-level write permissions,
+#   no top-level env/defaults blocks and no job env/default blocks;
+# - publish failures stay warnings by default so the analysis and the
+#   code scanning upload still land when the Scorecard backend rejects a
+#   one-off request; the upload step below runs with if: always() for the
+#   same reason.
+
+name: scorecard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, Monday 04:23 UTC: off the top of the hour so this repository
+    # does not queue with every job scheduled at exactly 00:00.
+    - cron: '23 4 * * 1'
+
+# Least privilege at the top level: read-only.
+permissions:
+  contents: read
+
+jobs:
+  analysis-pr:
+    name: Scorecard (pull_request, not published)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Run Scorecard analysis
+        uses: ossf/scorecard-action@23f22cd43608bae7a1f1fa2603d7314dee9538a5  # v2.6.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: false
+      - name: Upload results to code scanning (PR head only)
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea  # v4.39.4
+        with:
+          sarif_file: results.sarif
+          category: scorecard
+
+  analysis-publish:
+    name: Scorecard (main and weekly, published)
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Run Scorecard analysis
+        uses: ossf/scorecard-action@23f22cd43608bae7a1f1fa2603d7314dee9538a5  # v2.6.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      - name: Upload results to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea  # v4.39.4
+        with:
+          sarif_file: results.sarif
+          category: scorecard

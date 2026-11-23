@@ -1,0 +1,53 @@
+# CodeQL static analysis for the Python code and for the Actions workflows
+# themselves. Same conventions as ci.yml: every "uses:" step is pinned to a
+# full 40-char commit SHA with the resolved tag named in a trailing comment,
+# top-level permissions stay read-only, and jobs restate the permissions
+# they need (a job-level permissions block replaces the workflow set).
+# The CodeQL bundle shipped with the pinned codeql-action version supports
+# the actions language, and the actions query pack provides the same
+# security-extended suite that the Python leg uses, so both legs below run
+# identical suites. The analyze step uploads SARIF to code scanning as part
+# of its default behavior, so no separate upload-sarif step is needed, and
+# the per-language category keeps these results distinct from the other
+# uploaders on the same ref.
+
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege at the top level: read-only.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, actions]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea  # v4.39.4
+        with:
+          languages: ${{ matrix.language }}
+          # The code is interpreted Python plus declarative Actions files:
+          # there is nothing to build, so the no-build mode is explicit.
+          build-mode: none
+          queries: security-extended
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea  # v4.39.4
+        with:
+          # Distinct per language so none of these uploads collide with the
+          # other code scanning uploads on the same ref.
+          category: "/language:${{ matrix.language }}"

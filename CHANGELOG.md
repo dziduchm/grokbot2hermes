@@ -62,6 +62,35 @@ Added:
   builds one test leg per discovered PowerShell interpreter, so the windows
   CI legs exercise both pwsh 7 and powershell.exe 5.1 when both are
   installed).
+- CI security scanners: three pinned workflows next to ci.yml.
+  `codeql.yml` (CodeQL over the Python code and the Actions workflows,
+  security-extended suites, results in the Security tab), `sast.yml`
+  (bandit over production code only: g2h.py, g2h_ui.py, runalerts/,
+  .github/scripts; tests excluded because their findings are the
+  review's documented test-only classes; the gate fails on medium severity
+  and higher, semgrep with the community rules fails on any finding, and
+  pip-audit fails on any known advisory) and `scorecard.yml` (OpenSSF
+  Scorecard, published on pushes to main and a weekly schedule; PR runs
+  analyze the head without publishing). The sast and lint jobs install
+  their tools with `pip install --require-hashes` from hash-locked
+  closure files generated with `pip-compile --generate-hashes`:
+  requirements-repo.in (the source of truth: bandit 1.8.6, pip-audit
+  2.9.0, semgrep 1.186.0, moved up from the review's 1.136.0 for a
+  current scanner and for the dropped protobuf advisory in the audited
+  closure: the accepted advisory count moved from four to eight, all
+  inside semgrep's own dependency pins) and requirements-ruff.in (ruff
+  0.15.8, in sync with the pins above and .pre-commit-config.yaml) for
+  lint, which no longer installs the scanner tools. The pip-audit
+  step carries eight documented --ignore-vuln entries for advisories
+  inside semgrep's own dependency pins (mcp, opentelemetry-api,
+  wcmatch; the step comment in sast.yml states the release-coupled
+  conditions under which they must be revisited). The ten
+  semgrep ifs-tampering findings in runalerts/set-wait-timeout.sh carry
+  inline nosemgrep annotations with the review triage at each site
+  (comma-only IFS scoped to the loop's own split, restored at the top of
+  every iteration, input already validated to [a-z0-9-]+ with no leading
+  dash). README gains the three workflow badges, and SECURITY.md and
+  CONTRIBUTING.md document the scanners and how to run them locally.
 
 Changed:
 

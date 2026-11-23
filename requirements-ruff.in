@@ -1,0 +1,6 @@
+# Lint-only pin for the ci.yml lint job and the local lint venv: ruff,
+# without the sast scanner tools. The hash-locked install file is
+# requirements-ruff.txt, generated from this file with pip-compile
+# --generate-hashes (see CONTRIBUTING.md). Keep ruff in sync with
+# requirements-repo.in and .pre-commit-config.yaml.
+ruff==0.15.8
