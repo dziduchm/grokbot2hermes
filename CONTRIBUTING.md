@@ -22,7 +22,9 @@ is the HTTP contract reference, `docs/adapters/` holds adapter guidance
 source plus an SVG preview, editable at https://app.diagrams.net or in the
 draw.io desktop app; please re-export or update the SVG preview so it
 stays in sync with the `.drawio` source). `.github/workflows/ci.yml` is
-the pipeline.
+the pipeline, with the pinned security scanner workflows
+(`codeql.yml`, `sast.yml`, `scorecard.yml`) alongside it and their tool
+pins in `requirements-repo.txt`.
 
 ## Local setup
 
@@ -78,6 +80,37 @@ file, including inside SVG and draw.io label text).
 Secrets scan: CI also runs a full-history gitleaks pass using the pinned
 gitleaks-action against its default ruleset, so new or historical secrets
 in commits will fail the build.
+
+Security scanners (three more pinned workflows, same SHA-pinned action
+style): `codeql.yml` runs CodeQL over the Python code and the Actions
+workflows (results in the Security tab); `sast.yml` runs bandit over
+production code only (the gate fails on medium severity or higher - read
+SECURITY.md first: the low findings in production code are accepted by
+design and tests are excluded on purpose), semgrep with the community
+rules (any finding fails) and pip-audit over requirements-repo.txt (any
+known advisory fails, minus eight documented release-coupled ignores for
+semgrep's own dependency pins - see the pip-audit step comment in
+.github/workflows/sast.yml); `scorecard.yml` publishes the OpenSSF
+Scorecard report on main and a weekly schedule (pull_request runs analyze
+the head without publishing). The tool pins live in requirements-repo.txt.
+
+Copy-paste the scanner passes locally (a throwaway venv, no repository
+state touched):
+
+```console
+$ python3 -m venv /tmp/g2h-scanners-venv
+$ /tmp/g2h-scanners-venv/bin/python -m pip install -r requirements-repo.txt
+$ /tmp/g2h-scanners-venv/bin/bandit -q -r g2h.py g2h_ui.py runalerts .github/scripts
+$ /tmp/g2h-scanners-venv/bin/semgrep scan --config p/default --metrics=off
+$ /tmp/g2h-scanners-venv/bin/pip-audit --requirement requirements-repo.txt --strict
+```
+
+The bandit pass exits 1 as long as the accepted low findings are visible
+(the CI gate is `--severity-level medium` and expects exit 0); the semgrep
+and pip-audit passes must exit 0. The CI pip-audit carries eight documented
+`--ignore-vuln` flags for advisories inside semgrep's own dependency pins,
+so the local pip-audit pass above should report exactly those eight (and
+nothing else) until the semgrep pin in requirements-repo.txt moves.
 
 ## Test mechanics: the mock gateway
 

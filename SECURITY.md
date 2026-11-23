@@ -85,4 +85,34 @@ Design notes enforced by this repository:
   it is bounded, escaped and labeled inside the card, and never
   executed.
 
+Automated security scanning (GitHub Actions on every push and pull
+request):
+
+- CodeQL (`.github/workflows/codeql.yml`): Python plus the Actions
+  workflows, security-extended suites, results per language in the code
+  scanning dashboard (Security tab).
+- `sast` (`.github/workflows/sast.yml`): bandit over production code only
+  (g2h.py, g2h_ui.py, runalerts/, .github/scripts/; tests are excluded
+  because their findings are the review-documented test-only classes),
+  semgrep with the community rules, and pip-audit over
+  requirements-repo.txt. A medium or high bandit severity finding, any
+  semgrep community-rule finding or any known advisory in the audited set
+  fails the job, except for eight documented, release-coupled ignores for
+  advisories inside semgrep's own dependency pins (the mcp,
+  opentelemetry-api and wcmatch packages; see the pip-audit step comment
+  in .github/workflows/sast.yml). The low-severity bandit findings that
+  remain in production code are accepted by design: external calls are
+  fixed argv lists with no shell, the env var names the code reads are
+  exact constants, and the poll backoff curve intentionally uses
+  randomness. The only in-repo suppressions are the ten loop-scoped IFS
+  lines in
+  runalerts/set-wait-timeout.sh, each annotated in place with its triage
+  rationale.
+- OpenSSF Scorecard (`.github/workflows/scorecard.yml`): published on
+  pushes to main and a weekly schedule; pull_request runs analyze the head
+  without publishing.
+- Secrets: the full-history gitleaks scan runs in ci.yml against the
+  default ruleset with no allowlist; any future allowlist entry needs an
+  owner review first.
+
 Supported version: the latest code on `main`.

@@ -416,9 +416,14 @@ cmd_apply() {
     # anything is recorded or set) when a named profile dir is missing.
     missing=""
     IFS_backup=$IFS
-    IFS=,
+    # Ifs triage: the IFS assignments below are scoped to this loop's
+    # own word split and are restored at the top of every iteration; the
+    # profile names they split were validated to [a-z0-9-]+ with no
+    # leading dash. Semgrep bash.lang.security.ifs-tampering.ifs-tampering: false
+    # positive (2026-11 code-security review).
+    IFS=, # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
     for p in $profiles; do
-        IFS=$IFS_backup
+        IFS=$IFS_backup # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
         if [ ! -d "$PROFILE_ROOT/$p" ]; then
             missing="$missing $p"
         fi
@@ -448,9 +453,12 @@ cmd_apply() {
     umask "$umask_was"
     legacy_offenders=0
     IFS_backup=$IFS
-    IFS=,
+    # IFS triage: same scoped comma-only split as above, restored at the
+    # top of every iteration on validated profile names (2026-11
+    # code-security review).
+    IFS=, # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
     for p in $profiles; do
-        IFS=$IFS_backup
+        IFS=$IFS_backup # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
         c=$(read_prior "$p" "$KEY_CLARIFY" "$KEY_CLARIFY") || exit 1
         a=$(read_prior "$p" "$KEY_APPROVALS" "$KEY_APPROVALS") || exit 1
         l=$(read_prior "$p" "legacy $KEY_LEGACY" "$KEY_LEGACY") || exit 1
@@ -501,9 +509,12 @@ cmd_apply() {
     printf 'state file: %s\n' "$state_file"
     printf 'rollback later: bash %s --rollback %s\n' "$progname" "$state_file"
     # Pass 2: apply + verify per profile; every set command is echoed first.
-    IFS=,
+    # IFS triage: same scoped comma-only split as above, restored at the
+    # top of every iteration on validated profile names (2026-11
+    # code-security review).
+    IFS=, # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
     for p in $profiles; do
-        IFS=$IFS_backup
+        IFS=$IFS_backup # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
         printf 'profile: %s\n' "$p"
         hermes_config_set "$p" "$KEY_CLARIFY" "$wait_timeout" || die 1 "config set $KEY_CLARIFY failed for profile $p (exit $?)"
         hermes_config_set "$p" "$KEY_APPROVALS" "$wait_timeout" || die 1 "config set $KEY_APPROVALS failed for profile $p (exit $?)"
@@ -614,9 +625,12 @@ cmd_dry_run() {
         "${state_file:-$STATE_DIR_DEFAULT/wait-timeout-state-$stamp.jsonl}"
     printf '\nprior values (read from the raw profile config.yaml, not probed from hermes):\n'
     IFS_backup=$IFS
-    IFS=,
+    # IFS triage: same scoped comma-only split as above, restored at the
+    # top of every iteration on validated profile names (2026-11
+    # code-security review).
+    IFS=, # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
     for p in $profiles; do
-        IFS=$IFS_backup
+        IFS=$IFS_backup # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
         if [ ! -d "$PROFILE_ROOT/$p" ]; then
             printf '    %-14s profile dir missing: %s\n' "$p" "$PROFILE_ROOT/$p"
             continue
@@ -627,9 +641,12 @@ cmd_dry_run() {
         printf '    %-14s %s=%s  %s=%s  legacy %s=%s\n' "$p" "$KEY_CLARIFY" "${c:-(unset)}" "$KEY_APPROVALS" "${a:-(unset)}" "$KEY_LEGACY" "${l:-(unset)}"
     done
     printf '\ncommands per profile:\n'
-    IFS=,
+    # IFS triage: same scoped comma-only split as above, restored at the
+    # top of every iteration on validated profile names (2026-11
+    # code-security review).
+    IFS=, # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
     for p in $profiles; do
-        IFS=$IFS_backup
+        IFS=$IFS_backup # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
         # Transcript parity with --apply: the batch refuses when a named
         # profile dir is missing, so the dry run prints the same note here
         # instead of commands that nothing would run.

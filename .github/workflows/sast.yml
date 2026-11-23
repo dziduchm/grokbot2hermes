@@ -1,0 +1,97 @@
+# SAST and dependency audit for this repository. Same conventions as
+# ci.yml: every "uses:" step is pinned to a full 40-char commit SHA with
+# the resolved tag named in a trailing comment, and permissions stay
+# read-only end to end (nothing here uploads SARIF, so no
+# security-events write is requested).
+#
+# Scope: production code only (g2h.py, g2h_ui.py, runalerts/,
+# .github/scripts/). tests/ is excluded from the bandit scan on purpose:
+# its findings are the review-documented test-only classes (assert
+# statements, chmod loops in process-tree fixtures, urlopen to loopback,
+# path and git-ls-files literals). The remaining bandit findings on
+# production code are low severity and accepted by design (subprocess
+# argv lists with no shell, env var NAME constants, the polling backoff
+# curve); they are documented in SECURITY.md. The gate below therefore
+# fails only on medium severity and higher, which keeps accepted low
+# findings visible without suppression comments. Every semgrep
+# community-rule finding fails the job; the only in-repo suppressions are
+# the loop-scoped IFS pattern in runalerts/set-wait-timeout.sh, annotated
+# in place with their review triage.
+
+name: sast
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege at the top level: read-only.
+permissions:
+  contents: read
+
+jobs:
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          # semgrep is the only pinned tool with interpreter-tagged wheels
+          # (CPython 3.10 to 3.14 for 1.186.0; the sdist bundle does not
+          # carry a prebuilt rule engine), so the scanner job pins a
+          # mid-range 3.11 that every entry of requirements-repo.txt
+          # supports; the lint job keeps its own higher pin.
+          python-version: "3.11"
+      - name: Install the pinned, audited scanner tools
+        run: python -m pip install -r requirements-repo.txt
+      - name: Bandit scan (full report, no gate yet)
+        # Bandit exits 1 whenever it reports any finding, which is expected
+        # here because the accepted low findings above are in scope. Exit 2
+        # or higher means the scanner itself failed (unreadable target, bad
+        # options) and must fail the step, so the "|| rc=$?" form is used to
+        # capture the code under GitHub's default bash -e shell while still
+        # propagating scanner errors.
+        run: |
+          rc=0
+          bandit -q -r g2h.py g2h_ui.py runalerts .github/scripts \
+              --format txt --output "${{ runner.temp }}/bandit.txt" || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            exit "$rc"
+          fi
+      - name: Bandit gate (any medium or high severity finding fails)
+        run: |
+          bandit -r g2h.py g2h_ui.py runalerts .github/scripts \
+              --severity-level medium
+      - name: Semgrep scan (community rules, any finding fails)
+        # Telemetry off: the runner carries no semgrep app token and this
+        # workflow shares nothing with semgrep.dev.
+        run: |
+          semgrep scan --config p/default --error --metrics=off
+      - name: pip-audit (any known advisory in the audited set fails)
+        # The audited set is requirements-repo.txt plus its full resolved
+        # closure. Eight known advisories sit inside semgrep 1.186.0's own
+        # dependency pins with fixes outside those pins' bounds, so no
+        # current semgrep release resolves to fixed versions: five GHSA
+        # advisories affect mcp, which semgrep pins exactly
+        # (mcp==1.29.0, fixed in 1.30.0+), two affect opentelemetry-api
+        # (semgrep caps it around 1.37, fixed in 1.45.1+), and one affects
+        # wcmatch (semgrep caps it below 9, fixed in 11.2). They are
+        # accepted and documented: all three packages are CI-only scanner
+        # dependencies (nothing here ships, so nothing is installed on
+        # user machines), and GitHub runners give no production access.
+        # The ignores are release-coupled: when the semgrep pin in
+        # requirements-repo.txt next moves, drop stale --ignore-vuln
+        # entries first and re-audit; every other advisory in the closure
+        # still fails this job.
+        run: |
+          pip-audit --requirement requirements-repo.txt --strict \
+            --ignore-vuln GHSA-84m7-p3x7-pcfv \
+            --ignore-vuln GHSA-5h93-6whr-6q8j \
+            --ignore-vuln GHSA-w4fh-qvv9-3v23 \
+            --ignore-vuln GHSA-rwrf-2pqf-9j8j \
+            --ignore-vuln GHSA-qx49-fqc8-xw99 \
+            --ignore-vuln GHSA-xcq7-p3pf-p88h \
+            --ignore-vuln GHSA-mf5v-w3w3-f6cg \
+            --ignore-vuln GHSA-53pm-wgxf-c6qf
