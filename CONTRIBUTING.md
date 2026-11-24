@@ -87,7 +87,12 @@ in commits will fail the build.
 
 Security scanners (three more pinned workflows, same SHA-pinned action
 style): `codeql.yml` runs CodeQL over the Python code and the Actions
-workflows (results in the Security tab); `sast.yml` runs bandit over
+workflows (results in the Security tab); its only in-repo suppressions
+are test-only `py/overly-permissive-file` fixtures annotated
+`# lgtm [py/overly-permissive-file]` at the exact flagged line (fixtures
+that deliberately make a file world- or group-readable to prove
+production code refuses it); never extend that annotation into
+production code; `sast.yml` runs bandit over
 production code only (the gate fails on medium severity or higher - read
 SECURITY.md first: the low findings in production code are accepted by
 design and tests are excluded on purpose), semgrep with the community
@@ -99,8 +104,15 @@ Scorecard report on main and a weekly schedule (pull_request runs analyze
 the head without publishing). The tool pins live in requirements-repo.in;
 the sast and lint jobs install their tools with `--require-hashes` from
 the hash-locked requirements-repo.txt and requirements-ruff.txt closures
-pip-compile --generate-hashes generates from it. Regenerate the affected
-closure after editing a pin file, then re-run the pip-audit pass below:
+pip-compile --generate-hashes generates from it. The interpreter matters:
+requirements-repo.txt must be generated on CPython 3.11, the mid-range
+pin the sast job installs its tools on (the reasons sit in the
+setup-python step comment in .github/workflows/sast.yml: semgrep is the
+only pinned tool with interpreter-tagged wheels); requirements-ruff.txt
+must be generated on the lint job's own pin, CPython 3.12. A lock
+generated on another interpreter can resolve wheels the CI legs cannot
+install. Regenerate the affected closure after editing a pin file, then
+re-run the pip-audit pass below:
 
 ```console
 $ pip-compile --generate-hashes --output-file=requirements-repo.txt requirements-repo.in

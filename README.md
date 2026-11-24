@@ -1,11 +1,18 @@
 # GrokBot2Hermes
 
-Dispatch tasks from Grok Bot to Hermes Agent. Not a migration tool.
+A local, stdlib-only bridge and human-in-the-loop relay between Grok Bot
+and a local Hermes Agent: dispatch a task from a chat adapter through
+the gateway's documented Runs API, trail it with crash-safe 0600
+receipts and a stable exit-code contract automation can branch on, and
+relay approval events out to exactly one optional notifier, while the
+approvals themselves stay with humans. Not a migration tool; no package
+to install; run from the checkout.
 
 [![ci](https://github.com/dziduchm/grokbot2hermes/actions/workflows/ci.yml/badge.svg)](https://github.com/dziduchm/grokbot2hermes/actions/workflows/ci.yml)
 [![codeql](https://github.com/dziduchm/grokbot2hermes/actions/workflows/codeql.yml/badge.svg)](https://github.com/dziduchm/grokbot2hermes/actions/workflows/codeql.yml)
 [![sast](https://github.com/dziduchm/grokbot2hermes/actions/workflows/sast.yml/badge.svg)](https://github.com/dziduchm/grokbot2hermes/actions/workflows/sast.yml)
 [![scorecard](https://github.com/dziduchm/grokbot2hermes/actions/workflows/scorecard.yml/badge.svg)](https://github.com/dziduchm/grokbot2hermes/actions/workflows/scorecard.yml)
+[![release](https://img.shields.io/github/v/release/dziduchm/grokbot2hermes)](https://github.com/dziduchm/grokbot2hermes/releases)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -31,7 +38,19 @@ dashboard, a team wrapper, or a library with API promises. It adds no
 auto-anything: no auto-merge, no auto-approve, no auto-retry of caller
 errors, no automatic notifier retries either.
 
-## Architecture
+## How it works
+
+One stdlib client, three surfaces, everything local to your machine: the
+`g2h` command line (dispatch, wait, status, stop and cancel under an
+idempotent replay contract), an opt-in read-only dashboard over the same
+receipts, and the approval event relay with its one optional notifier.
+Exit codes are the control plane and receipts are the memory: if the
+machine dies mid-wait, rerunning `wait --receipt` never runs a task
+twice, and nothing here can answer a human control for you.
+
+> Demo status: reserved slot. A short demo recording (one dispatch
+> through the mock suite, then the phone arrival) will be embedded here
+> once recorded. Nothing is linked yet, so nothing in this slot 404s.
 
 ![Architecture diagram: Grok Bot and example adapters dispatch tasks through the g2h CLI over a bearer-authenticated loopback HTTP connection to the local Hermes Agent gateway Runs API, with crash-safe 0600 receipts, exit codes as the control plane, per-profile routing, and a manual human approval flow.](docs/architecture/grokbot2hermes.svg)
 
@@ -299,19 +318,29 @@ What Hermes already gives you natively versus what this adds:
 | multiplex profiles under /p/ | backoff with Retry-After honoring |
 | stop and drain handling | a stable exit-code contract for automation |
 
-## Security notes
+## Security model
 
-Full policy: SECURITY.md. The api key grants full agent access, including
-terminal commands on the agent host: treat it like a password. The key is
-only ever read from `G2H_API_KEY`, a 0600 key file or stdin; it never
-appears in argv, output, logs or receipts (a redaction wrapper scrubs
-every output path). Authorization is never forwarded across redirects;
-plain http to non-loopback hosts is refused unless you pass
-`--allow-insecure-http` (which warns). Approval and clarify are manual
-operator subcommands only. Automated security scanners (CodeQL, bandit,
-semgrep, pip-audit, a full-history gitleaks scan and OpenSSF Scorecard)
-run in this repository's GitHub Actions on every change; see SECURITY.md,
-section "Automated security scanning".
+Short version: the only credential surface is your gateway api key plus
+the optional webhook and notifier files; every sensitive value is
+fail-closed by design; and the human stays the only decision maker.
+
+- Loopback first: the dashboard binds to the local machine only and is
+  off unless you run it; plain http to a non-loopback host is refused.
+- Secrets stay out of argv, output, logs and receipts: the key enters
+  via an env var, a 0600 key file or stdin, and authorization is never
+  forwarded across redirects.
+- Fail closed: a credential file readable by group or others is refused,
+  an unknown privacy state refuses too, and malformed input stops the
+  pass instead of limping on.
+- Human settlement only: approval and clarify are manual operator
+  subcommands; the notifier carries visibility, never decisions.
+
+Full policy: SECURITY.md. The api key grants full agent access,
+including terminal commands on the agent host: treat it like a password.
+Automated security scanners (CodeQL, bandit, semgrep, pip-audit, a
+full-history gitleaks scan and OpenSSF Scorecard) run in this
+repository's GitHub Actions on every change; see SECURITY.md, section
+"Automated security scanning".
 
 ## Version support and provenance
 
@@ -332,6 +361,13 @@ completed. Receipts were 0600 in a 0700 directory, and the api key
 appeared in no output, receipt or log. Stop, replay, wrong-key and
 wrong-profile paths were verified against the mock suite, not against
 real runs.
+
+## Roadmap
+
+An out-of-tree Hermes plugin is planned as an easier, more integrated
+path for running GrokBot2Hermes inside the Hermes ecosystem, alongside
+the standalone client shipped here. No timeline is published; the
+standalone client stays supported as shipped.
 
 ## Contributing
 

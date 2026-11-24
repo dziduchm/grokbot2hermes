@@ -5,6 +5,55 @@ releases to package indexes; versions track the documented contracts).
 
 ## Unreleased
 
+Security and CI:
+
+- CodeQL `py/overly-permissive-file`: all nine open alerts on main pointed
+  at test-only chmod fixtures that deliberately make a fixture world- or
+  group-readable to prove production code refuses it. Each flagged line now
+  carries a narrow `# lgtm [py/overly-permissive-file]` annotation with the
+  reason beside it. No production chmod check was loosened and no blanket
+  path ignore was added; CONTRIBUTING.md documents the annotation class and
+  its boundary.
+- `runalerts/sender.py`: `urlsplit` raises a bare `ValueError` (for example
+  `Invalid IPv6 URL`) on malformed bracket netlocs such as
+  `http://[::1/hook`, and its callers catch only `AllowlistRefusal`, so a
+  malformed webhook url escaped the documented "webhook file not usable"
+  refusal path as an unhandled error. The parse and its lazy
+  hostname/username reads are now wrapped; a malformed url raises
+  `AllowlistRefusal("webhook url is malformed")` and the tick stays on the
+  documented no-POST refusal path. Pinned by a new case in the existing
+  trap/userinfo URL matrix.
+- `g2h.py` `resolve_notifier_destination`: the same `ValueError` edge on
+  `urlparse` now produces the same fail-closed usage refusal the
+  invalid-URL check already produces (exit 2, "invalid notifier URL", the
+  value never echoed), with a focused test in the notifier destination
+  policy suite. The sender-side fix is F1 from the same review; this is F2.
+- `.github/dependabot.yml` added for the `pip` and `github-actions`
+  ecosystems, monthly, in-repo only. The hash-locked tool closures keep
+  `--require-hashes` mandatory: lock regeneration stays the documented
+  pip-compile re-audit (CONTRIBUTING.md), never an automated hash rewrite.
+
+Docs:
+
+- README promotion pass: a pitch paragraph, an extended badge row with a
+  release v0.1.0 badge, "Architecture" retitled
+  to "How it works" with a short lead and a reserved demo placeholder, a
+  Security model section replacing the prose-only Security notes, and a
+  Roadmap line for the planned out-of-tree Hermes plugin (no timelines,
+  no unborn links).
+- SECURITY.md: the security advisory form is now named with its direct
+  URL, the eight CI-only advisory ignores spell out that they never ship
+  (stdlib-only client and sender), and Dependabot got a one-line entry in
+  the scanner inventory.
+- CONTRIBUTING.md: the `pip-compile --generate-hashes` interpreter rule is
+  now explicit (scanner closure on CPython 3.11, the sast job's own pin;
+  lint lock on the lint job's CPython 3.12), and the CodeQL
+  test-annotation class is documented with its boundary.
+- runalerts/README.md: a "Windows gateway stop" operational note (Ctrl+C
+  only ends the foreground process it was pressed against; `hermes gateway
+  stop` plus `hermes gateway status` is the clean teardown), mirroring the
+  v0.1.0 release notes callout.
+
 ## 0.1.0 - 2026-11-23
 
 First public GitHub release of this repository (tag v0.1.0). The shipped

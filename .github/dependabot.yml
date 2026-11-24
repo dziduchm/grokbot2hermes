@@ -1,0 +1,19 @@
+# Dependabot, configured in-repo for the two ecosystems this repository
+# ships: github-actions (the pinned action SHAs, which Dependabot can
+# propose) and pip (visibility over the pinned tooling manifests). The
+# closures keep --require-hashes mandatory by design: regenerating
+# requirements-repo.txt / requirements-ruff.txt stays the documented
+# pip-compile --generate-hashes process, on the interpreter pins spelled
+# out in CONTRIBUTING.md, and any hash-locked bump must go through that
+# manual re-audit, not an automated rewrite of the hashes.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly

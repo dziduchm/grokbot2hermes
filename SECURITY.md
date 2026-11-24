@@ -1,7 +1,9 @@
 # Security policy
 
-Report vulnerabilities privately to the repo owner (dziduchm) via a GitHub
-security advisory on this repository. Do not open a public issue.
+Report vulnerabilities privately to the repo owner (dziduchm) via the
+GitHub security advisory form for this repository:
+https://github.com/dziduchm/grokbot2hermes/security/advisories/new
+Do not open a public issue.
 
 Never include any of the following in an issue, advisory or message:
 
@@ -103,7 +105,11 @@ every push to main, and a weekly Scorecard run):
   fails the job, except for eight documented, release-coupled ignores for
   advisories inside semgrep's own dependency pins (the mcp,
   opentelemetry-api and wcmatch packages; see the pip-audit step comment
-  in .github/workflows/sast.yml). The low-severity bandit findings that
+  in .github/workflows/sast.yml). All eight are CI-only scanner
+  dependencies that never ship: no repository artifact installs them on
+  a user machine (the client and the sender are standard-library-only),
+  so nothing outside the GitHub Actions runners carries those
+  advisories. The low-severity bandit findings that
   remain in production code are accepted by design: external calls are
   fixed argv lists with no shell, the env var names the code reads are
   exact constants, and the poll backoff curve intentionally uses
@@ -117,5 +123,10 @@ every push to main, and a weekly Scorecard run):
 - Secrets: the full-history gitleaks scan runs in ci.yml against the
   default ruleset with no allowlist; any future allowlist entry needs an
   owner review first.
+- Dependabot (`.github/dependabot.yml`): monthly dependency alerts and
+  update proposals for the pip manifests and the pinned Actions SHAs;
+  the hash-locked tool closures keep `--require-hashes` mandatory, so a
+  lock regeneration always goes through the documented pip-compile
+  re-audit (CONTRIBUTING.md), never an automated hash rewrite.
 
 Supported version: the latest code on `main`.
