@@ -321,7 +321,9 @@ class TestSetWaitTimeoutPs1(unittest.TestCase):
             stub = os.path.join(stub_dir, "fake-hermes")
             with open(stub, "w", encoding="utf-8") as fh:
                 fh.write(FAKE_HERMES_SOURCE)
-            os.chmod(stub, 0o755)
+            # The fake-hermes stub must stay executable: the ps1 runs it as
+            # HERMES_BIN. Test-only fixture, temp dir only.
+            os.chmod(stub, 0o755)  # lgtm [py/overly-permissive-file] fixture
         return stub
 
     def run_ps(self, *args, drop_hermes_bin=False):

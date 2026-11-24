@@ -462,9 +462,18 @@ def load_webhook(path) -> Dict[str, str]:
     # a loopback trial. Https is allowed to any host, plain http only to the
     # loopback hostnames (trial), and a url that carries userinfo is refused
     # outright, matching the documented bus adapter contract.
-    parts = urlsplit(url)
-    hostname = parts.hostname or ""
-    userinfo = parts.username is not None or parts.password is not None
+    # urlsplit and its hostname/username readers parse lazily and raise a
+    # bare ValueError on malformed netloc shapes (for example the
+    # unbalanced "[" in `http://[::1/hook`). Callers catch only
+    # AllowlistRefusal, so a malformed url must come out as that refusal
+    # on the documented "webhook file not usable" path, never as an
+    # escape from this contract; the message never echoes the url.
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname or ""
+        userinfo = parts.username is not None or parts.password is not None
+    except ValueError as exc:
+        raise AllowlistRefusal("webhook url is malformed") from exc
     loopback = hostname in _LOOPBACK_URL_HOSTS
     if parts.scheme != "https" or not hostname:
         if parts.scheme != "http" or not loopback:
