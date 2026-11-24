@@ -288,8 +288,9 @@ Hermes key, cookie or signing key, and never touches the gateway or the DB.
 Full install (three OS options), webhook file format, and rollback:
 [runalerts/README.md](runalerts/README.md).
 
-Security model in one paragraph: human-only settlement (Marcin answers on
-the phone page himself; nothing in this path can approve, deny or resolve a
+Security model in one paragraph: human-only settlement (a named operator
+answers on the phone page in person; nothing in this path can approve, deny
+or resolve a
 waiter and nothing in it holds a credential that could), webhook fail-closed
 (https required outside loopback, redirects count as failures so the key is
 never replayed to a redirect target, credential files readable by group or

@@ -1,15 +1,21 @@
 # Dependabot, configured in-repo for the two ecosystems this repository
 # ships: github-actions (the pinned action SHAs, which Dependabot can
-# propose) and pip (visibility over the pinned tooling manifests). The
-# closures keep --require-hashes mandatory by design: regenerating
-# requirements-repo.txt / requirements-ruff.txt stays the documented
-# pip-compile --generate-hashes process, on the interpreter pins spelled
-# out in CONTRIBUTING.md, and any hash-locked bump must go through that
-# manual re-audit, not an automated rewrite of the hashes.
+# propose) and pip (visibility over the pinned tool versions in the
+# requirements-repo.in and requirements-ruff.in pin files).
+# Hash locking does not block Dependabot: its python updater can open
+# version-bump pull requests that carry PyPI-sourced hashes. The two
+# hash-locked closures are excluded below so the manual lock process
+# stays the only writer of the hash lines, and any Dependabot pip
+# change must be re-audited by regenerating the closure with
+# pip-compile --generate-hashes on the interpreter pins spelled out in
+# CONTRIBUTING.md and re-running pip-audit before merge.
 version: 2
 updates:
   - package-ecosystem: pip
     directory: "/"
+    exclude-paths:
+      - "requirements-repo.txt"
+      - "requirements-ruff.txt"
     schedule:
       interval: monthly
 

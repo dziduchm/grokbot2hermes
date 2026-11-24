@@ -1,4 +1,4 @@
-# G2C run-approvals chat alert sender (Marcin-only install)
+# G2C run-approvals chat alert sender (operator-managed install)
 
 The Hermes multiplex gateway runs a config-gated, keyless emitter that watches the
 live run-approval and clarify cards (pre-mint, no credentials) and appends one

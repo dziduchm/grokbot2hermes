@@ -1072,7 +1072,7 @@ class SenderCase(unittest.TestCase):
         path = self.webhook_file_raw("https://hook.example/x", DUMMY_KEY)
         # Deliberate 0644: prove the sender refuses a world-readable webhook
         # file fail-closed with no POST. Test-only fixture, temp dir only.
-        os.chmod(path, 0o644)  # lgtm [py/overly-permissive-file] test fixture
+        os.chmod(path, 0o644)
         server = CaptureServer()
         try:
             sender.run_once(self.ledger, path, now=self.now())
@@ -1087,7 +1087,7 @@ class SenderCase(unittest.TestCase):
         self.write_ledger([approval_record()])
         # Deliberate 0644: prove the sender refuses a world-readable ledger
         # fail-closed with no POST. Test-only fixture, temp dir only.
-        os.chmod(self.ledger, 0o644)  # lgtm [py/overly-permissive-file] test fixture
+        os.chmod(self.ledger, 0o644)
         server = CaptureServer()
         try:
             counts = sender.run_once(self.ledger, self.webhook_file(server),
@@ -1106,7 +1106,7 @@ class SenderCase(unittest.TestCase):
         self.write_ledger([approval_record()])
         path = self.webhook_file_raw("https://hook.example/x", DUMMY_KEY)
         # Deliberate 0640: a group-readable webhook file must refuse too.
-        os.chmod(path, 0o640)  # lgtm [py/overly-permissive-file] test fixture
+        os.chmod(path, 0o640)
         server = CaptureServer()
         try:
             counts = sender.run_once(self.ledger, path, now=self.now())
@@ -1121,7 +1121,7 @@ class SenderCase(unittest.TestCase):
     def test_group_readable_0640_ledger_is_refused(self):
         self.write_ledger([approval_record()])
         # Deliberate 0640: a group-readable ledger must refuse too.
-        os.chmod(self.ledger, 0o640)  # lgtm [py/overly-permissive-file]
+        os.chmod(self.ledger, 0o640)
         server = CaptureServer()
         try:
             counts = sender.run_once(self.ledger, self.webhook_file(server),

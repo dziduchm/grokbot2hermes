@@ -244,7 +244,7 @@ class TestSetWaitTimeout(unittest.TestCase):
             fh.write(FAKE_HERMES_SOURCE)
         # The fake-hermes stub must stay executable: the installer runs it as
         # HERMES_BIN. Test-only fixture, temp dir only.
-        os.chmod(self.stub, 0o755)  # lgtm [py/overly-permissive-file] fixture
+        os.chmod(self.stub, 0o755)
         self.state_path = ""
         self._last_out = ""
         self._last_err = ""

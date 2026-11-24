@@ -7,13 +7,18 @@ releases to package indexes; versions track the documented contracts).
 
 Security and CI:
 
-- CodeQL `py/overly-permissive-file`: all nine open alerts on main pointed
+- CodeQL `py/overly-permissive-file`: all nine open alerts on main point
   at test-only chmod fixtures that deliberately make a fixture world- or
-  group-readable to prove production code refuses it. Each flagged line now
-  carries a narrow `# lgtm [py/overly-permissive-file]` annotation with the
-  reason beside it. No production chmod check was loosened and no blanket
-  path ignore was added; CONTRIBUTING.md documents the annotation class and
-  its boundary.
+  group-readable to prove production code refuses it. They stay open as
+  expected negative fixtures: in-source CodeQL suppressions do not clear
+  them for this pipeline (the security-extended suite does not apply
+  in-source suppressions and code scanning ignores SARIF suppressions),
+  and a same-line annotation only churns alert identity, so none are
+  added. After merge the repository owner dismisses the nine alerts in
+  the Security tab with the negative-fixture reason. No production chmod
+  check was loosened and no blanket path ignore or dismiss-alerts
+  automation was added; CONTRIBUTING.md records the rationale and the
+  boundary.
 - `runalerts/sender.py`: `urlsplit` raises a bare `ValueError` (for example
   `Invalid IPv6 URL`) on malformed bracket netlocs such as
   `http://[::1/hook`, and its callers catch only `AllowlistRefusal`, so a
@@ -28,10 +33,20 @@ Security and CI:
   invalid-URL check already produces (exit 2, "invalid notifier URL", the
   value never echoed), with a focused test in the notifier destination
   policy suite. The sender-side fix is F1 from the same review; this is F2.
+- `g2h.py` `validate_base_url`: the third member of the same malformed-url
+  `ValueError` class: a malformed `--base-url` or `G2H_BASE_URL` (for
+  example `http://[::1:8642`) now exits 2 with a fixed usage refusal
+  instead of the unhandled `ValueError: Invalid IPv6 URL` internal error,
+  and the value is never echoed; pinned by a focused base-url policy test
+  with canary malformed urls.
 - `.github/dependabot.yml` added for the `pip` and `github-actions`
-  ecosystems, monthly, in-repo only. The hash-locked tool closures keep
-  `--require-hashes` mandatory: lock regeneration stays the documented
-  pip-compile re-audit (CONTRIBUTING.md), never an automated hash rewrite.
+  ecosystems, monthly, in-repo only. Hash locking does not block
+  Dependabot: it can open version-bump pull requests that carry
+  PyPI-sourced hashes. The two hash-locked closure files are excluded
+  from its scans and any Dependabot pip change is re-audited by
+  regenerating the closure with `pip-compile --generate-hashes`
+  (CONTRIBUTING.md) and re-running pip-audit before merge;
+  `--require-hashes` still fails an unverified hash in CI.
 
 Docs:
 
@@ -53,6 +68,9 @@ Docs:
   only ends the foreground process it was pressed against; `hermes gateway
   stop` plus `hermes gateway status` is the clean teardown), mirroring the
   v0.1.0 release notes callout.
+- README.md and runalerts/README.md: the two owner-name references on the
+  public pages are replaced with operator-neutral wording (the runalerts
+  install is described as operator-managed); no product rename.
 
 ## 0.1.0 - 2026-11-23
 
