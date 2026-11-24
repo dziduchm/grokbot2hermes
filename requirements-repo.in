@@ -10,6 +10,6 @@
 # ruff also drives the lint job in ci.yml and the pre-commit hook: bump
 # all three references in the same commit.
 bandit==1.8.6
-pip-audit==2.9.0
+pip-audit==2.10.1
 ruff==0.15.8
 semgrep==1.186.0
