@@ -1,4 +1,4 @@
-"""G2C run-approvals chat alerts: the separate sender process (Marcin-only install).
+"""G2C run-approvals chat alerts: the separate sender process (operator-managed install).
 
 Reads the gateway's alert ledger (the JSONL at HERMES_WEBAPP_RUN_ALERTS_OUTBOX, written
 by the in-gateway emitter), takes the first pending record per dedupe key
@@ -1056,7 +1056,7 @@ def run_ticks(ledger, webhook_path, notify_closed: bool = False,
 
 
 def self_test(webhook_path) -> int:
-    """Marcin's wiring check: POST the fixed self-test message and nothing else. The
+    """Operator wiring check: POST the fixed self-test message and nothing else. The
     ledger is never touched because no ledger argument exists on this path."""
     try:
         webhook = load_webhook(webhook_path)
@@ -1099,7 +1099,7 @@ def default_webhook_path() -> str:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="G2C run-approvals chat alert sender (Marcin-only install)")
+        description="G2C run-approvals chat alert sender (operator-managed install)")
     parser.add_argument("--ledger", help="path to the alert ledger JSONL (the gateway's "
                                          "HERMES_WEBAPP_RUN_ALERTS_OUTBOX)")
     parser.add_argument("--webhook", default=default_webhook_path(),

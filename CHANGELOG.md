@@ -71,6 +71,15 @@ Docs:
 - README.md and runalerts/README.md: the two owner-name references on the
   public pages are replaced with operator-neutral wording (the runalerts
   install is described as operator-managed); no product rename.
+- Residual personal-name cleanup: the architecture diagram (draw.io source
+  and its SVG preview kept in sync) now says "opt-in, requires the
+  operator's explicit approval" with no editor user metadata, the sender
+  module/self-test/argparse docstrings and the launchd plist and Windows
+  installer comments say operator-managed instead of a personal name, the
+  CODEOWNERS review comment names the review handle instead, and the
+  pyproject authors field is the GitHub handle `dziduchm` alone (matching
+  the LICENSE copyright). Repo URLs, badges and ownership lines are
+  unchanged.
 
 ## 0.1.0 - 2026-11-23
 
