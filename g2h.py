@@ -237,12 +237,21 @@ def default_receipt_dir(profile: str) -> str:
 
 
 def validate_base_url(ctx: Ctx, base: str, allow_insecure: bool) -> None:
-    parts = urllib.parse.urlparse(base)
+    # The url parse and its lazy hostname read raise a bare ValueError on
+    # malformed netloc shapes (for example the unbalanced bracket netloc
+    # in `http://[::1:8642`): a malformed --base-url or G2H_BASE_URL is a
+    # usage error (exit 2), never an internal error, and the value is
+    # never echoed here.
+    try:
+        parts = urllib.parse.urlparse(base)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        ctx.die(EXIT_USAGE, "invalid --base-url: the url does not parse; "
+                            "the value is never echoed")
     if parts.scheme not in ("http", "https") or not parts.netloc:
         ctx.die(EXIT_USAGE, "invalid --base-url: %r" % base)
     if parts.scheme == "https":
         return
-    host = (parts.hostname or "").lower()
     if host in LOOPBACK_HOSTS:
         return
     if not allow_insecure:
