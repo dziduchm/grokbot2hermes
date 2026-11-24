@@ -9,7 +9,7 @@ description = "Dispatch tasks from Grok Bot to Hermes Agent; stdlib-only client 
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
-authors = [{ name = "Marcin (dziduchm)" }]
+authors = [{ name = "dziduchm" }]
 keywords = ["hermes", "agent", "grok", "dispatch", "approvals"]
 classifiers = [
     "Intended Audience :: Developers",

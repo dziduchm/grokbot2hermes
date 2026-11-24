@@ -242,6 +242,8 @@ class TestSetWaitTimeout(unittest.TestCase):
         os.makedirs(os.path.dirname(self.stub))
         with open(self.stub, "w", encoding="utf-8") as fh:
             fh.write(FAKE_HERMES_SOURCE)
+        # The fake-hermes stub must stay executable: the installer runs it as
+        # HERMES_BIN. Test-only fixture, temp dir only.
         os.chmod(self.stub, 0o755)
         self.state_path = ""
         self._last_out = ""

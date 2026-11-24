@@ -386,6 +386,8 @@ class FixtureCase(_Harness, unittest.TestCase):
         key_file = os.path.join(self.ws, "loose-key.txt")
         with open(key_file, "w", encoding="utf-8") as handle:
             handle.write(self.key + "\n")
+        # Deliberate 0644: the negative half of this fixture; the client must
+        # refuse a world-readable key file with exit 3 before any request.
         os.chmod(key_file, 0o644)
         proc = self.client("dispatch", "--json", "--key-file", key_file,
                            "--input", "should never launch")
@@ -722,6 +724,8 @@ class DashboardRelayCase(_Harness, unittest.TestCase):
         ) % (record, behavior)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(script)
+        # The mock notifier script needs its exec bit: the engine runs it as
+        # the --notify-cmd command. Test-only fixture, temp dir only.
         os.chmod(path, 0o755)
         return path, record
 
@@ -1683,6 +1687,8 @@ class DashboardRelayCase(_Harness, unittest.TestCase):
         self.assertEqual(proc.returncode, 16)
         adapter_copy = os.path.join(self.ws, "grokbot-bus-example.py")
         shutil.copyfile(BUS_ADAPTER_PATH, adapter_copy)
+        # The copied adapter example needs its exec bit so the relay's
+        # --notify-cmd can run it; the docs/ original is never touched.
         os.chmod(adapter_copy, 0o755)
         snap = self.relay("--notify-cmd", adapter_copy)
         self.assertEqual(snap.returncode, 0, snap.stderr)
@@ -2202,6 +2208,54 @@ class NotifierDestinationPolicyTest(unittest.TestCase):
                 self.assertEqual(ctx.die_code, g2h.EXIT_USAGE)
                 self.assertNotIn("notif.example.com", ctx.message)
                 self.assertNotIn(self.CANARY_TOKEN, ctx.message)
+
+    def test_malformed_netloc_url_is_refused_without_echo(self):
+        # F2 (the same class the sender fixed in F1): a malformed bracket
+        # netloc makes urlparse raise a bare ValueError (Invalid IPv6 URL);
+        # it must come out as the same usage refusal, never as an escape
+        # from the resolve path or an echo of the value.
+        for url in ("http://[::1/hook", "https://[::1/hook",
+                    "http://evil[.example/hook"):
+            with self.subTest(url=url):
+                ctx = self.resolve_expect_exit(url)
+                self.assertEqual(ctx.die_code, g2h.EXIT_USAGE)
+                self.assertIn("invalid notifier URL", ctx.message)
+                self.assertIn("never echoed", ctx.message)
+                self.assertNotIn(url, ctx.message)
+                self.assertNotIn(self.CANARY_TOKEN, ctx.message)
+
+
+class BaseUrlPolicyTest(unittest.TestCase):
+    """Focused test for validate_base_url: a malformed --base-url or
+    G2H_BASE_URL raises a bare ValueError inside urlparse or its lazy
+    hostname read (for example the unbalanced bracket netloc in
+    `http://[::1:8642`); user-supplied config that cannot parse is a
+    usage error (exit 2), never an internal error, and the value is
+    never echoed.
+    """
+
+    def expect_usage(self, base):
+        ctx = _NotifierStubCtx()
+        with self.assertRaises(g2h.G2hExit):
+            g2h.validate_base_url(ctx, base, False)
+        self.assertTrue(ctx.died)
+        self.assertEqual(ctx.die_code, g2h.EXIT_USAGE)
+        return ctx
+
+    def test_malformed_base_url_is_usage_error_without_echo(self):
+        for base in ("http://[::1:8642", "https://[::1:8642",
+                     "http://evil[.example/hook"):
+            with self.subTest(base=base):
+                ctx = self.expect_usage(base)
+                self.assertIn("invalid --base-url", ctx.message)
+                self.assertIn("never echoed", ctx.message)
+                self.assertNotIn(base, ctx.message)
+
+    def test_wellformed_base_urls_still_pass(self):
+        for base in ("http://127.0.0.1:8642", "https://gateway.example"):
+            ctx = _NotifierStubCtx()
+            g2h.validate_base_url(ctx, base, False)
+            self.assertFalse(ctx.died)
 
 
 def _free_loopback_port():

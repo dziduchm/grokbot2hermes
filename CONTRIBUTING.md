@@ -87,7 +87,20 @@ in commits will fail the build.
 
 Security scanners (three more pinned workflows, same SHA-pinned action
 style): `codeql.yml` runs CodeQL over the Python code and the Actions
-workflows (results in the Security tab); `sast.yml` runs bandit over
+workflows (results in the Security tab). The nine
+`py/overly-permissive-file` findings pointing at the test-only chmod
+fixtures (they deliberately make a file world- or group-readable so
+production code can prove it refuses the loose mode) are expected
+negative fixtures. In-source `# lgtm` annotations do not suppress
+GitHub code-scanning alerts for this pipeline (the security-extended
+suite does not apply in-source suppressions and code scanning ignores
+SARIF suppressions), and a same-line annotation only churns alert
+identity, so none are added; after a merge the repository owner
+dismisses those nine open alerts in the Security tab with the
+negative-fixture reason, a manual GitHub-side action outside this
+repository. No blanket path ignore and no dismiss-alerts automation
+are used, and never move a fixture's loose mode into production code;
+`sast.yml` runs bandit over
 production code only (the gate fails on medium severity or higher - read
 SECURITY.md first: the low findings in production code are accepted by
 design and tests are excluded on purpose), semgrep with the community
@@ -99,8 +112,27 @@ Scorecard report on main and a weekly schedule (pull_request runs analyze
 the head without publishing). The tool pins live in requirements-repo.in;
 the sast and lint jobs install their tools with `--require-hashes` from
 the hash-locked requirements-repo.txt and requirements-ruff.txt closures
-pip-compile --generate-hashes generates from it. Regenerate the affected
-closure after editing a pin file, then re-run the pip-audit pass below:
+pip-compile --generate-hashes generates from it. The interpreter matters:
+requirements-repo.txt must be generated on CPython 3.11, the mid-range
+pin the sast job installs its tools on (the reasons sit in the
+setup-python step comment in .github/workflows/sast.yml: semgrep is the
+only pinned tool with interpreter-tagged wheels); requirements-ruff.txt
+must be generated on the lint job's own pin, CPython 3.12. A lock
+generated on another interpreter can resolve wheels the CI legs cannot
+install.
+
+Dependabot (`.github/dependabot.yml`) can open version-bump pull
+requests against the pip manifests, including hash-bearing rewrites of
+a lock file (hash locking does not block it). Both ecosystems wait
+behind a 7-day `cooldown` (`default-days: 7`), so a newly published
+version is not proposed until about a week after its release. A
+Dependabot pip change
+is never merged as-is: it is re-audited by regenerating the affected
+closure with `pip-compile --generate-hashes` on the documented
+interpreter and re-running the pip-audit pass, and the two lock files
+are excluded from Dependabot's scans so this manual process stays the
+only writer of the hash lines. Regenerate the affected closure after
+editing a pin file, then re-run the pip-audit pass below:
 
 ```console
 $ pip-compile --generate-hashes --output-file=requirements-repo.txt requirements-repo.in

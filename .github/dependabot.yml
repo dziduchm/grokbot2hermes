@@ -1,0 +1,34 @@
+# Dependabot, configured in-repo for the two ecosystems this repository
+# ships: github-actions (the pinned action SHAs, which Dependabot can
+# propose) and pip (visibility over the pinned tool versions in the
+# requirements-repo.in and requirements-ruff.in pin files).
+# Hash locking does not block Dependabot: its python updater can open
+# version-bump pull requests that carry PyPI-sourced hashes. The two
+# hash-locked closures are excluded below so the manual lock process
+# stays the only writer of the hash lines, and any Dependabot pip
+# change must be re-audited by regenerating the closure with
+# pip-compile --generate-hashes on the interpreter pins spelled out in
+# CONTRIBUTING.md and re-running pip-audit before merge.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    exclude-paths:
+      - "requirements-repo.txt"
+      - "requirements-ruff.txt"
+    # 7-day supply-chain wait required by the semgrep rule
+    # package_managers.dependabot.dependabot-missing-cooldown (a newly
+    # published version can be malicious or unstable; version updates
+    # only, security updates are never delayed).
+    cooldown:
+      default-days: 7
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    # Same 7-day supply-chain wait as the pip entry above.
+    cooldown:
+      default-days: 7
+    schedule:
+      interval: monthly

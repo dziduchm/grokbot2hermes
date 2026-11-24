@@ -1,7 +1,9 @@
 # Security policy
 
-Report vulnerabilities privately to the repo owner (dziduchm) via a GitHub
-security advisory on this repository. Do not open a public issue.
+Report vulnerabilities privately to the repo owner (dziduchm) via the
+GitHub security advisory form for this repository:
+https://github.com/dziduchm/grokbot2hermes/security/advisories/new
+Do not open a public issue.
 
 Never include any of the following in an issue, advisory or message:
 
@@ -90,7 +92,14 @@ every push to main, and a weekly Scorecard run):
 
 - CodeQL (`.github/workflows/codeql.yml`): Python plus the Actions
   workflows, security-extended suites, results per language in the code
-  scanning dashboard (Security tab).
+  scanning dashboard (Security tab). The nine `py/overly-permissive-file`
+  alerts against test-only chmod fixtures are expected negative fixtures
+  (each deliberately makes a file world- or group-readable to prove
+  production code refuses it): in-source suppressions do not clear
+  GitHub code-scanning alerts for this pipeline, so none are added, and
+  after a merge the repository owner dismisses those nine open alerts
+  in the Security tab with the negative-fixture reason; no blanket path
+  ignore and no dismiss-alerts automation are used.
 - `sast` (`.github/workflows/sast.yml`): bandit over production code only
   (g2h.py, g2h_ui.py, runalerts/, .github/scripts/; tests are excluded
   because their findings are the review-documented test-only classes),
@@ -103,7 +112,11 @@ every push to main, and a weekly Scorecard run):
   fails the job, except for eight documented, release-coupled ignores for
   advisories inside semgrep's own dependency pins (the mcp,
   opentelemetry-api and wcmatch packages; see the pip-audit step comment
-  in .github/workflows/sast.yml). The low-severity bandit findings that
+  in .github/workflows/sast.yml). All eight are CI-only scanner
+  dependencies that never ship: no repository artifact installs them on
+  a user machine (the client and the sender are standard-library-only),
+  so nothing outside the GitHub Actions runners carries those
+  advisories. The low-severity bandit findings that
   remain in production code are accepted by design: external calls are
   fixed argv lists with no shell, the env var names the code reads are
   exact constants, and the poll backoff curve intentionally uses
@@ -117,5 +130,17 @@ every push to main, and a weekly Scorecard run):
 - Secrets: the full-history gitleaks scan runs in ci.yml against the
   default ruleset with no allowlist; any future allowlist entry needs an
   owner review first.
+- Dependabot (`.github/dependabot.yml`): monthly dependency alerts and
+  update proposals for the pip manifests and the pinned Actions SHAs.
+  Version updates wait behind a 7-day `cooldown` (`default-days: 7`) in
+  both ecosystems before they are proposed.
+  Hash locking does not block Dependabot: it can open version-bump pull
+  requests that carry PyPI-sourced hashes. The two hash-locked closure
+  files are excluded from its scans, and any Dependabot pip change is
+  re-audited by regenerating the affected closure with
+  `pip-compile --generate-hashes` and re-running the pip-audit pass
+  (CONTRIBUTING.md) before merge; `--require-hashes` still fails an
+  unverified hash in CI. Never merge a lock change that skipped that
+  process.
 
 Supported version: the latest code on `main`.

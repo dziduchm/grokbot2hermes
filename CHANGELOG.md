@@ -5,6 +5,98 @@ releases to package indexes; versions track the documented contracts).
 
 ## Unreleased
 
+Security and CI:
+
+- CodeQL `py/overly-permissive-file`: all nine open alerts on main point
+  at test-only chmod fixtures that deliberately make a fixture world- or
+  group-readable to prove production code refuses it. They stay open as
+  expected negative fixtures: in-source CodeQL suppressions do not clear
+  them for this pipeline (the security-extended suite does not apply
+  in-source suppressions and code scanning ignores SARIF suppressions),
+  and a same-line annotation only churns alert identity, so none are
+  added. After merge the repository owner dismisses the nine alerts in
+  the Security tab with the negative-fixture reason. No production chmod
+  check was loosened and no blanket path ignore or dismiss-alerts
+  automation was added; CONTRIBUTING.md records the rationale and the
+  boundary.
+- `runalerts/sender.py`: `urlsplit` raises a bare `ValueError` (for example
+  `Invalid IPv6 URL`) on malformed bracket netlocs such as
+  `http://[::1/hook`, and its callers catch only `AllowlistRefusal`, so a
+  malformed webhook url escaped the documented "webhook file not usable"
+  refusal path as an unhandled error. The parse and its lazy
+  hostname/username reads are now wrapped; a malformed url raises
+  `AllowlistRefusal("webhook url is malformed")` and the tick stays on the
+  documented no-POST refusal path. Pinned by a new case in the existing
+  trap/userinfo URL matrix.
+- `g2h.py` `resolve_notifier_destination`: the same `ValueError` edge on
+  `urlparse` now produces the same fail-closed usage refusal the
+  invalid-URL check already produces (exit 2, "invalid notifier URL", the
+  value never echoed), with a focused test in the notifier destination
+  policy suite. The sender-side fix is F1 from the same review; this is F2.
+- `g2h.py` `validate_base_url`: the third member of the same malformed-url
+  `ValueError` class: a malformed `--base-url` or `G2H_BASE_URL` (for
+  example `http://[::1:8642`) now exits 2 with a fixed usage refusal
+  instead of the unhandled `ValueError: Invalid IPv6 URL` internal error,
+  and the value is never echoed; pinned by a focused base-url policy test
+  with canary malformed urls.
+- `.github/dependabot.yml` added for the `pip` and `github-actions`
+  ecosystems, monthly, in-repo only. Hash locking does not block
+  Dependabot: it can open version-bump pull requests that carry
+  PyPI-sourced hashes. The two hash-locked closure files are excluded
+  from its scans and any Dependabot pip change is re-audited by
+  regenerating the closure with `pip-compile --generate-hashes`
+  (CONTRIBUTING.md) and re-running pip-audit before merge;
+  `--require-hashes` still fails an unverified hash in CI.
+- `.github/dependabot.yml`: both package ecosystems now carry a 7-day
+  `cooldown` with `default-days: 7`, the supply-chain wait the semgrep
+  rule `package_managers.dependabot.dependabot-missing-cooldown`
+  requires (a newly published version can be malicious or unstable, and
+  Dependabot version updates now wait 7 days before proposing it;
+  security updates are never delayed by a cooldown). The monthly
+  schedule, the pip exclude-paths and the hash-lock re-audit process
+  are unchanged.
+- `.github/workflows/scorecard.yml`: the two `ossf/scorecard-action`
+  pins are temporarily downgraded to v2.5.0
+  (`fa7117db83c52d787ae5a89f350999701505d78e`) because the v2.6.0 GHCR
+  image manifests return 404 MANIFEST_UNKNOWN
+  (ossf/scorecard-action#1752); the publish job, the pull_request job
+  and the weekly schedule keep their shape, and the pins return to
+  `23f22cd43608bae7a1f1fa2603d7314dee9538a5` (v2.6.0) as soon as
+  upstream republishes a pullable v2.6.0 image.
+
+Docs:
+
+- README promotion pass: a pitch paragraph, an extended badge row with a
+  release v0.1.0 badge, "Architecture" retitled
+  to "How it works" with a short lead and a reserved demo placeholder, a
+  Security model section replacing the prose-only Security notes, and a
+  Roadmap line for the planned out-of-tree Hermes plugin (no timelines,
+  no unborn links).
+- SECURITY.md: the security advisory form is now named with its direct
+  URL, the eight CI-only advisory ignores spell out that they never ship
+  (stdlib-only client and sender), and Dependabot got a one-line entry in
+  the scanner inventory.
+- CONTRIBUTING.md: the `pip-compile --generate-hashes` interpreter rule is
+  now explicit (scanner closure on CPython 3.11, the sast job's own pin;
+  lint lock on the lint job's CPython 3.12), and the CodeQL
+  test-annotation class is documented with its boundary.
+- runalerts/README.md: a "Windows gateway stop" operational note (Ctrl+C
+  only ends the foreground process it was pressed against; `hermes gateway
+  stop` plus `hermes gateway status` is the clean teardown), mirroring the
+  v0.1.0 release notes callout.
+- README.md and runalerts/README.md: the two owner-name references on the
+  public pages are replaced with operator-neutral wording (the runalerts
+  install is described as operator-managed); no product rename.
+- Residual personal-name cleanup: the architecture diagram (draw.io source
+  and its SVG preview kept in sync) now says "opt-in, requires the
+  operator's explicit approval" with no editor user metadata, the sender
+  module/self-test/argparse docstrings and the launchd plist and Windows
+  installer comments say operator-managed instead of a personal name, the
+  CODEOWNERS review comment names the review handle instead, and the
+  pyproject authors field is the GitHub handle `dziduchm` alone (matching
+  the LICENSE copyright). Repo URLs, badges and ownership lines are
+  unchanged.
+
 ## 0.1.0 - 2026-11-23
 
 First public GitHub release of this repository (tag v0.1.0). The shipped

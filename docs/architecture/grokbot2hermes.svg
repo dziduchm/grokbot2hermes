@@ -273,7 +273,7 @@
     <text x="685.0" y="1128.6" font-size="12.0" text-anchor="start" fill="#24292f">
       <tspan x="685.0" dy="0" font-weight="600">Real destination (for example an agent bus):</tspan>
       <tspan x="685.0" dy="17.0">NOT wired in this repo; no URL or token shipped</tspan>
-      <tspan x="685.0" dy="17.0">opt-in, requires Marcin's explicit approval</tspan>
+      <tspan x="685.0" dy="17.0">opt-in, requires the operator's explicit approval</tspan>
       </text>
   </g>
   <g>

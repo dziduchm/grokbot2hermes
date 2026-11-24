@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  G2C run-approvals chat alert sender: launchd timer template (Marcin-only install).
+  G2C run-approvals chat alert sender: launchd timer template (operator-managed install).
 
   Fill in every placeholder below (paths only), copy the filled file to
   ~/Library/LaunchAgents/com.example.g2c.runalerts-sender.plist and load it:

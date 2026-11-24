@@ -1,5 +1,5 @@
 # G2C run-approvals chat alert sender: Windows Task Scheduler installer
-# (Marcin-only install; nothing in this repo registers or starts anything by itself).
+# (operator-managed install; nothing in this repo registers or starts anything by itself).
 #
 # Fill in the two placeholder values below, review the script, then run it from
 # a regular (non-admin) PowerShell window in the repo checkout:

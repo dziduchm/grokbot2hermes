@@ -1,4 +1,4 @@
-"""G2C run-approvals chat alerts: the separate sender process (Marcin-only install).
+"""G2C run-approvals chat alerts: the separate sender process (operator-managed install).
 
 Reads the gateway's alert ledger (the JSONL at HERMES_WEBAPP_RUN_ALERTS_OUTBOX, written
 by the in-gateway emitter), takes the first pending record per dedupe key
@@ -462,9 +462,18 @@ def load_webhook(path) -> Dict[str, str]:
     # a loopback trial. Https is allowed to any host, plain http only to the
     # loopback hostnames (trial), and a url that carries userinfo is refused
     # outright, matching the documented bus adapter contract.
-    parts = urlsplit(url)
-    hostname = parts.hostname or ""
-    userinfo = parts.username is not None or parts.password is not None
+    # urlsplit and its hostname/username readers parse lazily and raise a
+    # bare ValueError on malformed netloc shapes (for example the
+    # unbalanced "[" in `http://[::1/hook`). Callers catch only
+    # AllowlistRefusal, so a malformed url must come out as that refusal
+    # on the documented "webhook file not usable" path, never as an
+    # escape from this contract; the message never echoes the url.
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname or ""
+        userinfo = parts.username is not None or parts.password is not None
+    except ValueError as exc:
+        raise AllowlistRefusal("webhook url is malformed") from exc
     loopback = hostname in _LOOPBACK_URL_HOSTS
     if parts.scheme != "https" or not hostname:
         if parts.scheme != "http" or not loopback:
@@ -1047,7 +1056,7 @@ def run_ticks(ledger, webhook_path, notify_closed: bool = False,
 
 
 def self_test(webhook_path) -> int:
-    """Marcin's wiring check: POST the fixed self-test message and nothing else. The
+    """Operator wiring check: POST the fixed self-test message and nothing else. The
     ledger is never touched because no ledger argument exists on this path."""
     try:
         webhook = load_webhook(webhook_path)
@@ -1090,7 +1099,7 @@ def default_webhook_path() -> str:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="G2C run-approvals chat alert sender (Marcin-only install)")
+        description="G2C run-approvals chat alert sender (operator-managed install)")
     parser.add_argument("--ledger", help="path to the alert ledger JSONL (the gateway's "
                                          "HERMES_WEBAPP_RUN_ALERTS_OUTBOX)")
     parser.add_argument("--webhook", default=default_webhook_path(),

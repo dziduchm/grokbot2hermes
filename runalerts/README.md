@@ -1,4 +1,4 @@
-# G2C run-approvals chat alert sender (Marcin-only install)
+# G2C run-approvals chat alert sender (operator-managed install)
 
 The Hermes multiplex gateway runs a config-gated, keyless emitter that watches the
 live run-approval and clarify cards (pre-mint, no credentials) and appends one
@@ -472,5 +472,10 @@ separate follow-up).
 - "Restart" always means kickstarting the single gateway launchd unit
   (`ai.hermes.gateway`, owner of ports 8642 and 9120), never any global env
   mechanism (`launchctl setenv`, shell profiles).
+- Windows gateway stop: if Ctrl+C in the gateway terminal does not stop
+  the gateway, run `hermes gateway stop` and confirm with
+  `hermes gateway status` (the same callout the v0.1.0 release notes
+  carry). Ctrl+C only ends the one foreground process it was pressed
+  against; it is not a clean gateway teardown.
 - Tests: `python3 -m unittest discover -s tests -v` (repo CI rules: ruff 0.15.8
   on `g2h.py` and `tests/`, em/en-dash byte scan, gitleaks).

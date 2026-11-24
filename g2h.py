@@ -237,12 +237,21 @@ def default_receipt_dir(profile: str) -> str:
 
 
 def validate_base_url(ctx: Ctx, base: str, allow_insecure: bool) -> None:
-    parts = urllib.parse.urlparse(base)
+    # The url parse and its lazy hostname read raise a bare ValueError on
+    # malformed netloc shapes (for example the unbalanced bracket netloc
+    # in `http://[::1:8642`): a malformed --base-url or G2H_BASE_URL is a
+    # usage error (exit 2), never an internal error, and the value is
+    # never echoed here.
+    try:
+        parts = urllib.parse.urlparse(base)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        ctx.die(EXIT_USAGE, "invalid --base-url: the url does not parse; "
+                            "the value is never echoed")
     if parts.scheme not in ("http", "https") or not parts.netloc:
         ctx.die(EXIT_USAGE, "invalid --base-url: %r" % base)
     if parts.scheme == "https":
         return
-    host = (parts.hostname or "").lower()
     if host in LOOPBACK_HOSTS:
         return
     if not allow_insecure:
@@ -2111,7 +2120,20 @@ def resolve_notifier_destination(ctx: Ctx, args) -> tuple:
         return "none", None
     kind, value, where = sources[0]
     if kind == "url":
-        parts = urllib.parse.urlparse(value)
+        # urlparse and its hostname reader parse lazily and raise a bare
+        # ValueError on malformed netloc shapes (for example the
+        # unbalanced "[" in `http://[::1/hook`): a url that cannot parse
+        # must produce the same fail-closed refusal as any other invalid
+        # destination, not an escape out of the resolve path. The value
+        # is never echoed in any path below.
+        try:
+            parts = urllib.parse.urlparse(value)
+            hostname = (parts.hostname or "").lower()
+        except ValueError:
+            ctx.die(EXIT_USAGE,
+                    "invalid notifier URL from %s: expected a "
+                    "https://host URL, or an http:// URL to 127.0.0.1, "
+                    "localhost or ::1; the value is never echoed" % where)
         if parts.scheme not in ("http", "https") or not parts.netloc:
             ctx.die(EXIT_USAGE,
                     "invalid notifier URL from %s: expected a "
@@ -2120,8 +2142,7 @@ def resolve_notifier_destination(ctx: Ctx, args) -> tuple:
         # A bearer token must never travel in cleartext: plain http is a
         # loopback trial only (the same rule the runalerts sender enforces).
         # The hostname check parses the URL, it never scans substrings.
-        if parts.scheme == "http" \
-                and (parts.hostname or "").lower() not in LOOPBACK_HOSTS:
+        if parts.scheme == "http" and hostname not in LOOPBACK_HOSTS:
             ctx.die(EXIT_USAGE,
                     "plaintext http is refused for remote notifier "
                     "destinations (loopback only): use https; the value "

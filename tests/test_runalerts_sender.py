@@ -555,6 +555,17 @@ class SenderCase(unittest.TestCase):
                 with self.assertRaises(sender.AllowlistRefusal):
                     sender.load_webhook(self.webhook_file(url=url))
 
+    def test_webhook_malformed_netloc_url_refused(self):
+        # F1: a malformed bracket netloc makes urlsplit raise a bare
+        # ValueError (Invalid IPv6 URL); it must surface as a clean
+        # AllowlistRefusal on the documented "webhook file not usable"
+        # path, never as an escape from the contract.
+        for url in ("http://[::1/hook", "https://[::1/hook",
+                    "http://evil[.example/hook"):
+            with self.subTest(url=url):
+                with self.assertRaises(sender.AllowlistRefusal):
+                    sender.load_webhook(self.webhook_file(url=url))
+
     def test_webhook_https_any_host_still_allowed(self):
         data = sender.load_webhook(self.webhook_file(url="https://example.com/hook"))
         self.assertEqual(data["url"], "https://example.com/hook")
@@ -1059,6 +1070,8 @@ class SenderCase(unittest.TestCase):
     def test_world_readable_webhook_is_refused(self):
         self.write_ledger([approval_record()])
         path = self.webhook_file_raw("https://hook.example/x", DUMMY_KEY)
+        # Deliberate 0644: prove the sender refuses a world-readable webhook
+        # file fail-closed with no POST. Test-only fixture, temp dir only.
         os.chmod(path, 0o644)
         server = CaptureServer()
         try:
@@ -1072,6 +1085,8 @@ class SenderCase(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX chmod-only check; Windows uses icacls")
     def test_world_readable_ledger_is_refused(self):
         self.write_ledger([approval_record()])
+        # Deliberate 0644: prove the sender refuses a world-readable ledger
+        # fail-closed with no POST. Test-only fixture, temp dir only.
         os.chmod(self.ledger, 0o644)
         server = CaptureServer()
         try:
@@ -1090,6 +1105,7 @@ class SenderCase(unittest.TestCase):
         # a 0640 file readable by every local account.
         self.write_ledger([approval_record()])
         path = self.webhook_file_raw("https://hook.example/x", DUMMY_KEY)
+        # Deliberate 0640: a group-readable webhook file must refuse too.
         os.chmod(path, 0o640)
         server = CaptureServer()
         try:
@@ -1104,6 +1120,7 @@ class SenderCase(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX chmod-only check; Windows uses icacls")
     def test_group_readable_0640_ledger_is_refused(self):
         self.write_ledger([approval_record()])
+        # Deliberate 0640: a group-readable ledger must refuse too.
         os.chmod(self.ledger, 0o640)
         server = CaptureServer()
         try:
