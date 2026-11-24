@@ -123,7 +123,10 @@ install.
 
 Dependabot (`.github/dependabot.yml`) can open version-bump pull
 requests against the pip manifests, including hash-bearing rewrites of
-a lock file (hash locking does not block it). A Dependabot pip change
+a lock file (hash locking does not block it). Both ecosystems wait
+behind a 7-day `cooldown` (`default-days: 7`), so a newly published
+version is not proposed until about a week after its release. A
+Dependabot pip change
 is never merged as-is: it is re-audited by regenerating the affected
 closure with `pip-compile --generate-hashes` on the documented
 interpreter and re-running the pip-audit pass, and the two lock files

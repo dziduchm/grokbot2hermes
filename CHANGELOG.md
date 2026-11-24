@@ -47,6 +47,22 @@ Security and CI:
   regenerating the closure with `pip-compile --generate-hashes`
   (CONTRIBUTING.md) and re-running pip-audit before merge;
   `--require-hashes` still fails an unverified hash in CI.
+- `.github/dependabot.yml`: both package ecosystems now carry a 7-day
+  `cooldown` with `default-days: 7`, the supply-chain wait the semgrep
+  rule `package_managers.dependabot.dependabot-missing-cooldown`
+  requires (a newly published version can be malicious or unstable, and
+  Dependabot version updates now wait 7 days before proposing it;
+  security updates are never delayed by a cooldown). The monthly
+  schedule, the pip exclude-paths and the hash-lock re-audit process
+  are unchanged.
+- `.github/workflows/scorecard.yml`: the two `ossf/scorecard-action`
+  pins are temporarily downgraded to v2.5.0
+  (`fa7117db83c52d787ae5a89f350999701505d78e`) because the v2.6.0 GHCR
+  image manifests return 404 MANIFEST_UNKNOWN
+  (ossf/scorecard-action#1752); the publish job, the pull_request job
+  and the weekly schedule keep their shape, and the pins return to
+  `23f22cd43608bae7a1f1fa2603d7314dee9538a5` (v2.6.0) as soon as
+  upstream republishes a pullable v2.6.0 image.
 
 Docs:
 

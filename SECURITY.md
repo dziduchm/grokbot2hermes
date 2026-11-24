@@ -132,6 +132,8 @@ every push to main, and a weekly Scorecard run):
   owner review first.
 - Dependabot (`.github/dependabot.yml`): monthly dependency alerts and
   update proposals for the pip manifests and the pinned Actions SHAs.
+  Version updates wait behind a 7-day `cooldown` (`default-days: 7`) in
+  both ecosystems before they are proposed.
   Hash locking does not block Dependabot: it can open version-bump pull
   requests that carry PyPI-sourced hashes. The two hash-locked closure
   files are excluded from its scans, and any Dependabot pip change is

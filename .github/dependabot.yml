@@ -16,10 +16,19 @@ updates:
     exclude-paths:
       - "requirements-repo.txt"
       - "requirements-ruff.txt"
+    # 7-day supply-chain wait required by the semgrep rule
+    # package_managers.dependabot.dependabot-missing-cooldown (a newly
+    # published version can be malicious or unstable; version updates
+    # only, security updates are never delayed).
+    cooldown:
+      default-days: 7
     schedule:
       interval: monthly
 
   - package-ecosystem: github-actions
     directory: "/"
+    # Same 7-day supply-chain wait as the pip entry above.
+    cooldown:
+      default-days: 7
     schedule:
       interval: monthly
